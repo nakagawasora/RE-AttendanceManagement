@@ -1,0 +1,9 @@
+{
+    "scripts": {
+        "push:dev": "clasp --project .clasp.dev.json push",
+        "push:prod": "clasp --project .clasp.prod.json push",
+
+        "pull:dev": "clasp --project .clasp.dev.json pull",
+        "pull:prod": "clasp --project .clasp.prod.json pull"
+    }
+}
