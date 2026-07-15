@@ -10,12 +10,102 @@
         <h2 class="text-center m-4">勤怠入力フォーム</h2>
         <form class="mb-5" method="POST" action="<?= deployURL ?>" accept-charset="UTF-8">
           <? output._ = formHTML ?>
-          <div class="d-flex">
-            <button type='submit' class="btn btn-outline-secondary ms-3" name="load" value="true">呼び出し</button>
-            <button type='submit' class="btn btn-outline-primary ms-3" name="save" value="true">一時保存</button>
-            <button type="submit" class="btn btn-primary ms-3 ms-auto" name="submit" value="true">提出</button>
+          <div class="d-flex flex-wrap gap-2 align-items-start">
+            <button type='submit' class="btn btn-outline-secondary" name="load" value="true">呼び出し</button>
+            <button type='submit' class="btn btn-outline-primary" name="save" value="true">一時保存</button>
+            <div class="ms-auto">
+              <div class="btn-group" role="group" aria-label="実績">
+                <button type="submit" class="btn btn-outline-success" name="view" value="worktime" formmethod="GET" formtarget="_blank">実績</button>
+                <button type="button" class="btn btn-outline-success" id="worktimeMonthToggle" aria-expanded="false" aria-controls="worktimeMonthWrap">年月▼</button>
+              </div>
+              <div id="worktimeMonthWrap" class="d-none mt-2">
+                <div class="small text-muted mb-1">年月を指定</div>
+                <input class="form-control form-control-sm js-worktime-month" type="month" name="monthForWorkTime" aria-label="実績の年月">
+              </div>
+            </div>
+            <button type="submit" class="btn btn-primary" name="submit" value="true">提出</button>
           </div>
         </form>
       </div>
+      <script>
+        const projectAccess = <?!= projectAccessJson ?>;
+        const emailInput = document.getElementById('email');
+        const projectSelect = document.getElementById('projectSelect');
+        let projectFilterRequestId = 0;
+        const currentMonthValue = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
+        document.querySelectorAll('.js-worktime-month').forEach(input => input.max = currentMonthValue);
+
+        function normalizeEmail(value) {
+          return String(value || '').trim().toLowerCase();
+        }
+        async function sha256Hex(value) {
+          if (!window.crypto || !window.crypto.subtle || !window.TextEncoder) {
+            return '';
+          }
+          const buffer = await window.crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+          return Array.from(new Uint8Array(buffer)).map(byte => byte.toString(16).padStart(2, '0')).join('');
+        }
+        function resetProjectOptions(projects) {
+          const selectedProject = projectSelect.value || projectSelect.dataset.selectedProject || '';
+          projectSelect.innerHTML = '';
+          const placeholder = document.createElement('option');
+          placeholder.value = '';
+          placeholder.textContent = '選択してください';
+          placeholder.disabled = true;
+          projectSelect.appendChild(placeholder);
+
+          projects.forEach(project => {
+            const option = document.createElement('option');
+            option.value = project.name;
+            option.textContent = project.name;
+            projectSelect.appendChild(option);
+          });
+
+          if (selectedProject && projects.some(project => project.name === selectedProject)) {
+            projectSelect.value = selectedProject;
+          } else {
+            projectSelect.value = '';
+          }
+          placeholder.selected = projectSelect.value === '';
+        }
+        async function refreshProjectOptions() {
+          const requestId = ++projectFilterRequestId;
+          const normalizedEmail = normalizeEmail(emailInput.value);
+          if (!normalizedEmail) {
+            resetProjectOptions(projectAccess);
+            return;
+          }
+          const emailHash = await sha256Hex(normalizedEmail);
+          if (requestId !== projectFilterRequestId) {
+            return;
+          }
+          if (!emailHash) {
+            resetProjectOptions(projectAccess);
+            return;
+          }
+          const filteredProjects = projectAccess.filter(project => {
+            if (project.allUsers) {
+              return true;
+            }
+            return Boolean(emailHash && (project.assignedEmailHashes || []).includes(emailHash));
+          });
+          resetProjectOptions(filteredProjects);
+        }
+
+        document.getElementById('worktimeMonthToggle').addEventListener('click', function() {
+          const wrap = document.getElementById('worktimeMonthWrap');
+          const isHidden = wrap.classList.toggle('d-none');
+          this.setAttribute('aria-expanded', String(!isHidden));
+        });
+        document.querySelector('form').addEventListener('keydown', function(event) {
+          if (event.key === 'Enter' && event.target.tagName !== 'TEXTAREA') {
+            event.preventDefault();
+          }
+        });
+        if (emailInput && projectSelect) {
+          emailInput.addEventListener('input', refreshProjectOptions);
+          refreshProjectOptions();
+        }
+      </script>
     </body>
 </html>

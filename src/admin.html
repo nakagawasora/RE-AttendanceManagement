@@ -1,0 +1,990 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <meta charset="utf-8">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+      .modal-backdrop-lite {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, .35);
+        display: none;
+        align-items: center;
+        justify-content: center;
+        z-index: 1000;
+      }
+      .modal-backdrop-confirm { z-index: 1500; }
+      .modal-backdrop-lite.is-open { display: flex; }
+      .modal-panel {
+        width: min(1160px, calc(100vw - 32px));
+        max-height: calc(100vh - 32px);
+        overflow: auto;
+        background: #fff;
+        border-radius: 6px;
+        padding: 24px;
+      }
+      .modal-title-lite {
+        text-align: center;
+        margin-bottom: 20px;
+      }
+      .modal-body-wide {
+        width: 100%;
+        margin: 0 auto;
+      }
+      .modal-body-balanced {
+        width: min(920px, 100%);
+        margin: 0 auto;
+      }
+      .modal-body-form {
+        width: min(980px, 100%);
+        margin: 0 auto;
+      }
+      .transfer-pane { min-height: 320px; }
+      .admin-shell {
+        width: 80%;
+        margin: 0 auto;
+      }
+      .admin-section {
+        padding: 20px 0 28px;
+        border-top: 1px solid #e9ecef;
+      }
+      .admin-section h4 {
+        font-size: 1.05rem;
+        font-weight: 700;
+        margin-bottom: 16px;
+      }
+      .admin-subhead {
+        font-size: .95rem;
+        font-weight: 700;
+        color: #495057;
+        margin: 12px 0;
+      }
+      .admin-table {
+        table-layout: fixed;
+        border-color: #edf0f2;
+      }
+      .admin-table thead th {
+        color: #6c757d;
+        font-size: .78rem;
+        font-weight: 700;
+        letter-spacing: .02em;
+        background: #f8f9fa;
+        border-bottom: 1px solid #dee2e6;
+      }
+      .admin-table tbody td {
+        background: #fff;
+      }
+      .admin-table .cell-long {
+        overflow-wrap: anywhere;
+        word-break: break-word;
+      }
+      .table th, .table td {
+        text-align: left;
+        vertical-align: middle;
+      }
+      .admin-actions {
+        display: flex;
+        justify-content: flex-start;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .admin-form {
+        display: inline-block;
+        margin: 0;
+      }
+      .admin-form-full {
+        display: block;
+        width: 100%;
+      }
+      .action-btn {
+        min-width: 112px;
+        white-space: nowrap;
+      }
+      .action-btn-sm {
+        min-width: 84px;
+        white-space: nowrap;
+      }
+      .admin-message {
+        min-height: 24px;
+      }
+      .loading-overlay {
+        position: fixed;
+        inset: 0;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        background: rgba(255,255,255,.72);
+        z-index: 2000;
+      }
+      .loading-overlay.is-open { display: flex; }
+      .spinner-lite {
+        width: 42px;
+        height: 42px;
+        border: 4px solid #ced4da;
+        border-top-color: #0d6efd;
+        border-radius: 50%;
+        animation: spin .8s linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+  </head>
+  <body>
+    <div class="admin-shell">
+      <h2 class="my-4">勤怠管理</h2>
+      <?!= message ?>
+      <div id="adminMessage" class="admin-message text-danger mb-3"></div>
+      <div class="mb-4">ログイン中: <?= activeEmail || '取得できません' ?></div>
+
+      <? if (authed) { ?>
+      <div id="app"></div>
+      <div id="modal" class="modal-backdrop-lite"></div>
+      <div id="confirmModal" class="modal-backdrop-lite modal-backdrop-confirm"></div>
+      <div id="loadingOverlay" class="loading-overlay"><div class="spinner-lite" aria-label="処理中"></div></div>
+      <? } else { ?>
+      <p class="text-danger">このGoogleアカウントは管理画面の利用を許可されていません。</p>
+      <? } ?>
+    </div>
+
+    <? if (authed) { ?>
+    <script>
+      let snapshot = <?!= snapshotJson ?>;
+      const app = document.getElementById('app');
+      const modal = document.getElementById('modal');
+      const confirmModal = document.getElementById('confirmModal');
+      const loadingOverlay = document.getElementById('loadingOverlay');
+      let pendingAdminParams = null;
+      const NO_ASSIGNED_USERS = '__NONE__';
+
+      renderAdminApp();
+
+      function normalizeSnapshot() {
+        snapshot = snapshot || {};
+        snapshot.activeUsers = snapshot.activeUsers || [];
+        snapshot.projects = snapshot.projects || [];
+        snapshot.wageUpgrades = snapshot.wageUpgrades || [];
+        snapshot.roleAllowances = snapshot.roleAllowances || [];
+        snapshot.adminWhitelist = snapshot.adminWhitelist || [];
+        snapshot.latestBillReaction = snapshot.latestBillReaction || { message: '未取得', unreactedUsers: [] };
+        snapshot.latestBillReaction.unreactedUsers = snapshot.latestBillReaction.unreactedUsers || [];
+        snapshot.adminExecutionLogs = snapshot.adminExecutionLogs || [];
+      }
+
+      function renderAdminApp() {
+        normalizeSnapshot();
+        app.innerHTML = `
+        ${section('一括操作', `
+          <div class="mb-3">
+            ${periodForm('setBillForPeriod', '一括発行')}
+          </div>
+          <div class="mb-3">
+            <div class="d-flex align-items-center gap-3">
+              <div>最新まとめ投稿日時: ${esc(formatSlackTs(snapshot.latestBillReaction.messageTs) || snapshot.latestBillReaction.message || '')}</div>
+              <button class="btn btn-sm btn-outline-secondary action-btn" type="button" onclick="refreshLatestBillReaction()">更新</button>
+            </div>
+            <h6 class="mt-3">未リアクションユーザー一覧</h6>
+            <div class="mb-2">
+              <button class="btn btn-sm btn-outline-primary action-btn" type="button" onclick="bulkRemindSelectedUsers()">選択ユーザーへ催促</button>
+              <button class="btn btn-sm btn-outline-primary action-btn" type="button" onclick="bulkRemindAllUsers()">全員へ催促</button>
+            </div>
+            ${table(['','ID','名前','SlackID','操作'], snapshot.latestBillReaction.unreactedUsers.map(user => [
+              `<input type="checkbox" class="bulk-remind-check" value="${esc(user.slackUserId)}">`,
+              user.id,
+              user.name,
+              user.slackUserId,
+              actionGroup(postForm(`<input type="hidden" name="action" value="remindUnreactedUser"><input type="hidden" name="slackUserId" value="${esc(user.slackUserId)}"><button class="btn btn-sm btn-outline-primary action-btn-sm">催促通知</button>`))
+            ]), 'bulk')}
+          </div>
+          <div class="d-flex flex-wrap gap-3">
+            ${periodForm('gatherBillsForPeriod', '一括回収')}
+          </div>
+          <h6 class="mt-4">一括処理ログ</h6>
+          ${table(['日時','処理','対象','結果','詳細'], snapshot.adminExecutionLogs.map(log => [
+            log.timestamp,
+            log.action,
+            log.period,
+            log.status,
+            log.message
+          ]), 'standard')}
+        `)}
+        ${section('ユーザー', `
+          ${table(['ID','名前','Email','SlackID','操作'], snapshot.activeUsers.map(user => [
+            user.id, user.name, user.email, user.slackUserId,
+            actionGroup(`${periodForm('resetBillForPeriod', '再発行', `<input type="hidden" name="attendanceSheetId" value="${esc(user.attendanceSheetId)}">`, 'btn-sm btn-outline-primary action-btn-sm')}${postForm(`<input type="hidden" name="action" value="deleteUser"><input type="hidden" name="userId" value="${esc(user.id)}"><button class="btn btn-sm btn-outline-danger action-btn-sm">論理削除</button>`)}`)
+          ]), 'standard')}
+        `)}
+        ${section('PJ', `
+          <h5 class="admin-subhead">有効PJ</h5>
+          <div class="mb-2">
+            <button class="btn btn-sm btn-outline-danger action-btn" type="button" onclick="bulkUpdateSelectedProjects(false)">選択PJを無効化</button>
+          </div>
+          ${projectTable(snapshot.projects.filter(project => project.activeInterpreted === '有効'), true)}
+          ${postForm(`
+            <input type="hidden" name="action" value="addProject">
+            <div class="row g-2">
+              ${input('projectName','PJ名')}
+              ${input('hourlyWage','時給','number')}
+              <div class="col-auto align-self-end"><button class="btn btn-primary">PJ追加</button></div>
+            </div>
+          `)}
+          <div class="mt-4">
+            <button class="btn btn-outline-secondary action-btn" type="button" onclick="togglePeriod('inactiveProjects')">無効PJ▼</button>
+            <div id="inactiveProjects" class="d-none mt-3">
+              <div class="mb-2">
+                <button class="btn btn-sm btn-success action-btn" type="button" onclick="bulkUpdateSelectedProjects(true)">選択PJを有効化</button>
+              </div>
+              ${projectTable(snapshot.projects.filter(project => project.activeInterpreted !== '有効'), false)}
+            </div>
+          </div>
+        `)}
+        ${section('時給増分', `
+          ${wageUpgradeTable()}
+        `)}
+        ${section('役職手当', `
+          ${roleAllowanceTable()}
+          ${postForm(`
+            <input type="hidden" name="action" value="addRoleAllowance">
+            <div class="d-flex flex-nowrap gap-2 align-items-end">
+              ${input('allowanceName','手当名','text','','flex-fill')}
+              ${userSelect('userId', '', '対象ユーザー', 'flex-fill')}
+              ${input('price','単価','number','','flex-fill')}
+              <div><button class="btn btn-primary action-btn">追加</button></div>
+            </div>
+          `)}
+        `)}
+        ${section('管理者', `
+          ${adminWhitelistTable()}
+          ${postForm(`
+            <input type="hidden" name="action" value="addAdminWhitelistEntry">
+            <div class="d-flex flex-nowrap gap-2 align-items-end">
+              ${input('email','Email','email','','flex-fill')}
+              ${input('memo','メモ','text','','flex-fill')}
+              <div><button class="btn btn-primary action-btn">追加</button></div>
+            </div>
+          `)}
+        `)}
+      `;
+      }
+
+      function periodForm(action, label, extra = '', buttonClass = 'btn-outline-primary') {
+        const id = `${action}_${Math.random().toString(36).slice(2)}`;
+        const maxMonth = previousMonthValue();
+        return postForm(`
+          <input type="hidden" name="action" value="${action}">
+          ${extra}
+          <div class="btn-group" role="group">
+            <button class="btn ${buttonClass} action-btn" type="submit">${label}</button>
+            <button class="btn ${buttonClass}" type="button" onclick="togglePeriod('${id}')">年月▼</button>
+          </div>
+          <div id="${id}" class="d-none mt-2">
+            <input class="form-control form-control-sm" type="month" name="aggregationPeriod" max="${maxMonth}">
+          </div>
+        `);
+      }
+
+      function projectTable(projects, isActiveList) {
+        return table(['','ID','PJ名','時給','割当','操作'], projects.map(project => [
+          `<input type="checkbox" class="bulk-project-check" data-active-list="${isActiveList ? 'true' : 'false'}" value="${esc(project.id)}">`,
+          project.id,
+          project.name,
+          project.hourlyWage,
+          assignmentCell(project),
+          actionGroup(`
+            <button class="btn btn-sm btn-outline-primary action-btn-sm" type="button" onclick="openAssignmentModal('${escAttr(project.id)}')">割当編集</button>
+            ${postForm(`<input type="hidden" name="action" value="updateProject"><input type="hidden" name="projectId" value="${esc(project.id)}"><input type="hidden" name="assignedUserIds" value="${esc(project.assignedUserIds || '')}"><input type="hidden" name="active" value="${isActiveList ? 'false' : 'true'}"><button class="btn btn-sm ${isActiveList ? 'btn-outline-danger' : 'btn-success'} action-btn-sm">${isActiveList ? '無効化' : '有効化'}</button>`)}
+          `)
+        ]), 'bulk');
+      }
+
+      function wageUpgradeTable() {
+        const users = snapshot.activeUsers || [];
+        const rows = [];
+        users.forEach(user => {
+          const upgrades = snapshot.wageUpgrades.filter(upgrade => String(upgrade.userId) === String(user.id));
+          const userRows = (upgrades.length ? upgrades : [{ userId: user.id, projectId: '', increment: '' }]).slice().sort((a, b) => {
+            const diff = Number(a.increment || 0) - Number(b.increment || 0);
+            if (diff !== 0) return diff;
+            return String(a.projectId || '').localeCompare(String(b.projectId || ''));
+          });
+          userRows.forEach((upgrade, index) => {
+            const project = snapshot.projects.find(item => String(item.id) === String(upgrade.projectId)) || {};
+            const sameIncrementPrev = index > 0 && String(userRows[index - 1].increment || '') === String(upgrade.increment || '');
+            let incrementSpan = 1;
+            if (!sameIncrementPrev) {
+              for (let j = index + 1; j < userRows.length; j++) {
+                if (String(userRows[j].increment || '') !== String(upgrade.increment || '')) break;
+                incrementSpan++;
+              }
+            }
+            rows.push(`<tr>
+              ${index === 0 ? `<td rowspan="${userRows.length}">${esc(user.id)}</td><td rowspan="${userRows.length}">${esc(user.name)}</td>` : ''}
+              ${sameIncrementPrev ? '' : `<td rowspan="${incrementSpan}">${esc(upgrade.increment || '')}</td>`}
+              <td>${esc(projectLabel(project))}</td>
+              ${index === 0 ? `<td rowspan="${userRows.length}"><button class="btn btn-sm btn-outline-primary action-btn" type="button" onclick="openWageModal('${escAttr(user.id)}')">編集</button></td>` : ''}
+            </tr>`);
+          });
+        });
+        return `<div class="table-responsive"><table class="table table-sm table-striped admin-table"><colgroup>${colGroup('standard', 5)}</colgroup><thead><tr><th>ユーザーID</th><th>名前</th><th>増分</th><th>対象PJ</th><th>操作</th></tr></thead><tbody>${rows.join('') || '<tr><td colspan="5">データがありません</td></tr>'}</tbody></table></div>`;
+      }
+
+      function roleAllowanceTable() {
+        return table(['ID','手当名','対象ユーザー','単価','操作'], (snapshot.roleAllowances || []).map(row => [
+          row.id,
+          row.name,
+          userLabelById(row.userId),
+          row.price,
+          actionGroup(`
+            <button class="btn btn-sm btn-outline-primary action-btn-sm" type="button" onclick="openRoleModal('${escAttr(row.id)}')">編集</button>
+            ${postForm(`<input type="hidden" name="action" value="deleteRoleAllowance"><input type="hidden" name="allowanceId" value="${esc(row.id)}"><button class="btn btn-sm btn-outline-danger action-btn-sm">論理削除</button>`)}
+          `)
+        ]), 'standard');
+      }
+
+      function adminWhitelistTable() {
+        return table(['Email','状態','メモ','操作'], (snapshot.adminWhitelist || []).map(row => [
+          `<span class="cell-long">${esc(row.email)}</span>`,
+          row.active ? '有効' : '無効',
+          row.memo || '',
+          actionGroup(`
+            <button class="btn btn-sm btn-outline-primary action-btn-sm" type="button" onclick="openAdminWhitelistModal('${escAttr(row.email)}')">編集</button>
+            ${postForm(`<input type="hidden" name="action" value="updateAdminWhitelistEntry"><input type="hidden" name="email" value="${esc(row.email)}"><input type="hidden" name="memo" value="${esc(row.memo || '')}"><input type="hidden" name="active" value="${row.active ? 'false' : 'true'}"><button class="btn btn-sm ${row.active ? 'btn-outline-danger' : 'btn-success'} action-btn-sm">${row.active ? '無効化' : '有効化'}</button>`)}
+            ${postForm(`<input type="hidden" name="action" value="deleteAdminWhitelistEntry"><input type="hidden" name="email" value="${esc(row.email)}"><button class="btn btn-sm btn-outline-danger action-btn-sm">削除</button>`)}
+          `)
+        ]), 'adminWhitelist');
+      }
+
+      function openAdminWhitelistModal(email) {
+        const row = (snapshot.adminWhitelist || []).find(item => normalizeEmail(item.email) === normalizeEmail(email));
+        openModal(`
+          <div class="modal-body-form">
+            <h5 class="modal-title-lite">管理者編集</h5>
+            ${postForm(`
+              <input type="hidden" name="action" value="updateAdminWhitelistEntry">
+              <input type="hidden" name="email" value="${esc(row.email)}">
+              <div class="row g-3 justify-content-center">
+                <div class="col-md-7"><label class="form-label">Email</label><input class="form-control" value="${esc(row.email)}" disabled></div>
+                <div class="col-md-5"><label class="form-label">状態</label><select class="form-select" name="active"><option value="true" ${row.active ? 'selected' : ''}>有効</option><option value="false" ${row.active ? '' : 'selected'}>無効</option></select></div>
+                ${input('memo','メモ','text', row.memo || '', 'col-md-12')}
+              </div>
+              <div class="d-flex justify-content-between mt-4"><button class="btn btn-outline-secondary action-btn" type="button" onclick="closeModal()">キャンセル</button><button class="btn btn-primary action-btn">保存</button></div>
+            `, 'admin-form-full')}
+          </div>
+        `);
+      }
+
+      function assignmentCell(project) {
+        const summary = project.assignedSummary || project.assignedInterpreted || '全員';
+        const detail = project.assignedDetail || project.assignedInterpreted || summary;
+        return `<span title="${escAttr(detail)}">${esc(summary)}</span>`;
+      }
+
+      function openAssignmentModal(projectId) {
+        const project = snapshot.projects.find(item => String(item.id) === String(projectId));
+        const assignedIds = new Set(String(project.assignedUserIds || '').split(',').map(value => value.trim()).filter(Boolean));
+        const allAssigned = assignedIds.size === 0;
+        const unassigned = allAssigned ? [] : snapshot.activeUsers.filter(user => !assignedIds.has(String(user.id)));
+        const assigned = allAssigned ? snapshot.activeUsers.slice() : snapshot.activeUsers.filter(user => assignedIds.has(String(user.id)));
+        openModal(`
+          <div class="modal-body-wide">
+            <h5 class="modal-title-lite">割当編集: ${esc(project.name)}</h5>
+            ${postForm(`
+              <input type="hidden" name="action" value="updateProjectAssignments">
+              <input type="hidden" name="projectId" value="${esc(project.id)}">
+              <input type="hidden" name="originalAssignedUserIds" value="${esc(normalizeAssignedUserIds(project.assignedUserIds || ''))}">
+              <input type="hidden" id="assignedUserIds" name="assignedUserIds" value="${esc(project.assignedUserIds || '')}">
+              <div class="row align-items-stretch justify-content-center g-4">
+                <div class="col-lg-5">${userSelectTable('unassignedUsers', unassigned, '未割り当て')}</div>
+                <div class="col-lg-2 d-grid align-content-center gap-3 px-lg-4"><button class="btn btn-outline-secondary" type="button" onclick="moveUsers('unassignedUsers','assignedUsers')">→</button><button class="btn btn-outline-secondary" type="button" onclick="moveUsers('assignedUsers','unassignedUsers')">←</button></div>
+                <div class="col-lg-5">${userSelectTable('assignedUsers', assigned, '割り当て済み')}</div>
+              </div>
+              <div class="d-flex justify-content-between mt-4"><button class="btn btn-outline-secondary action-btn" type="button" onclick="closeModal()">キャンセル</button><button class="btn btn-primary action-btn" onclick="syncAssignedUsers()">保存</button></div>
+            `, 'admin-form-full')}
+          </div>
+        `);
+      }
+
+      function openWageModal(userId) {
+        const user = snapshot.activeUsers.find(item => String(item.id) === String(userId));
+        const upgrades = {};
+        snapshot.wageUpgrades.filter(item => String(item.userId) === String(userId)).forEach(item => upgrades[String(item.projectId)] = item.increment);
+        const rows = snapshot.projects.map(project => `
+          <tr><td>${esc(projectLabel(project))}</td><td><input class="form-control form-control-sm wage-input" data-project-id="${esc(project.id)}" type="number" value="${esc(upgrades[String(project.id)] || 0)}"></td></tr>
+        `).join('');
+        openModal(`
+          <div class="modal-body-balanced">
+            <h5 class="modal-title-lite">${esc(user.name || user.id)}さんの時給増分</h5>
+            ${postForm(`
+              <input type="hidden" name="action" value="updateWageUpgrades">
+              <input type="hidden" name="userId" value="${esc(userId)}">
+              <input type="hidden" id="wageProjectIds" name="projectIds">
+              <input type="hidden" id="wageIncrements" name="increments">
+              <div class="table-responsive"><table class="table table-sm admin-table"><thead><tr><th>対象PJ</th><th>時給増分</th></tr></thead><tbody>${rows}</tbody></table></div>
+              <div class="d-flex justify-content-between mt-4"><button class="btn btn-outline-secondary action-btn" type="button" onclick="closeModal()">キャンセル</button><button class="btn btn-primary action-btn" onclick="syncWageInputs()">保存</button></div>
+            `, 'admin-form-full')}
+          </div>
+        `);
+      }
+
+      function openRoleModal(id) {
+        const row = snapshot.roleAllowances.find(item => String(item.id) === String(id));
+        openModal(`
+          <div class="modal-body-form">
+            <h5 class="modal-title-lite">役職手当編集</h5>
+            ${postForm(`
+              <input type="hidden" name="action" value="updateRoleAllowance">
+              <input type="hidden" name="allowanceId" value="${esc(row.id)}">
+              <div class="row g-3 justify-content-center">
+                ${input('allowanceName','手当名','text', row.name, 'col-md-5')}
+                ${userSelect('userId', row.userId, '対象ユーザー', 'col-md-7')}
+                ${input('price','単価','number', row.price, 'col-md-5')}
+              </div>
+              <div class="d-flex justify-content-between mt-4"><button class="btn btn-outline-secondary action-btn" type="button" onclick="closeModal()">キャンセル</button><button class="btn btn-primary action-btn">保存</button></div>
+            `, 'admin-form-full')}
+          </div>
+        `);
+      }
+
+      function userSelectTable(id, users, title) {
+        return `<div class="transfer-pane border rounded p-2"><h6>${title}</h6><table class="table table-sm"><tbody id="${id}">${users.map(user => `<tr data-user-id="${esc(user.id)}"><td><input type="checkbox"></td><td>${esc(userLabel(user))}</td></tr>`).join('')}</tbody></table></div>`;
+      }
+
+      function moveUsers(fromId, toId) {
+        const from = document.getElementById(fromId);
+        const to = document.getElementById(toId);
+        Array.from(from.querySelectorAll('tr')).filter(row => row.querySelector('input').checked).forEach(row => {
+          row.querySelector('input').checked = false;
+          to.appendChild(row);
+        });
+      }
+      function syncAssignedUsers() {
+        const assignedIds = Array.from(document.querySelectorAll('#assignedUsers tr')).map(row => row.dataset.userId);
+        document.getElementById('assignedUserIds').value = normalizeAssignedUserIds(assignedIds);
+      }
+      function syncWageInputs() {
+        const inputs = Array.from(document.querySelectorAll('.wage-input'));
+        document.getElementById('wageProjectIds').value = inputs.map(input => input.dataset.projectId).join(',');
+        document.getElementById('wageIncrements').value = inputs.map(input => input.value || 0).join(',');
+      }
+      function openModal(body) {
+        modal.innerHTML = `<div class="modal-panel">${body}</div>`;
+        modal.classList.add('is-open');
+      }
+      function closeModal() {
+        modal.classList.remove('is-open');
+        modal.innerHTML = '';
+      }
+      function openConfirmModal(message) {
+        confirmModal.innerHTML = `
+          <div class="modal-panel" style="width: min(560px, calc(100vw - 32px));">
+            <h5 class="modal-title-lite">確認</h5>
+            <p class="mb-4">${esc(message)}</p>
+            <div class="d-flex justify-content-between">
+              <button class="btn btn-outline-secondary action-btn" type="button" onclick="closeConfirmModal()">キャンセル</button>
+              <button class="btn btn-primary action-btn" type="button" onclick="executeConfirmedAdminAction()">実行</button>
+            </div>
+          </div>
+        `;
+        confirmModal.classList.add('is-open');
+      }
+      function closeConfirmModal() {
+        confirmModal.classList.remove('is-open');
+        confirmModal.innerHTML = '';
+        pendingAdminParams = null;
+      }
+      function togglePeriod(id) {
+        document.getElementById(id).classList.toggle('d-none');
+      }
+      function monthValue(date) {
+        return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+      }
+      function previousMonthValue() {
+        const now = new Date();
+        return monthValue(new Date(now.getFullYear(), now.getMonth() - 1, 1));
+      }
+      function section(title, body) {
+        return `<section class="admin-section"><h4>${title}</h4>${body}</section>`;
+      }
+      function postForm(body, className = 'admin-form') {
+        return `<form class="${className}" onsubmit="submitAdminForm(event)"><input type="hidden" name="mode" value="admin">${body}</form>`;
+      }
+      function input(name, label, type = 'text', value = '', colClass = 'col-auto') {
+        return `<div class="${colClass}"><label class="form-label">${label}</label><input class="form-control" type="${type}" name="${name}" value="${esc(value)}"></div>`;
+      }
+      function userSelect(name, value = '', label = '対象ユーザー', colClass = 'col-auto') {
+        const options = snapshot.activeUsers.map(user => {
+          const selected = String(user.id) === String(value) ? 'selected' : '';
+          return `<option value="${esc(user.id)}" ${selected}>${esc(userLabel(user))}</option>`;
+        }).join('');
+        return `<div class="${colClass}"><label class="form-label">${label}</label><select class="form-select" name="${name}"><option value="">選択してください</option>${options}</select></div>`;
+      }
+      function normalizeAssignedUserIds(value) {
+        const isArrayValue = Array.isArray(value);
+        const rawValue = String(value || '').trim();
+        if (!isArrayValue && rawValue === NO_ASSIGNED_USERS) {
+          return NO_ASSIGNED_USERS;
+        }
+        const ids = isArrayValue ? value : rawValue.split(',');
+        if (!ids.map(item => String(item).trim()).filter(Boolean).length) {
+          return isArrayValue ? NO_ASSIGNED_USERS : '';
+        }
+        const selectedIdSet = new Set(ids.map(item => String(item).trim()).filter(Boolean));
+        const activeIdSet = new Set(snapshot.activeUsers.map(user => String(user.id)));
+        const normalized = snapshot.activeUsers
+          .map(user => String(user.id))
+          .filter(id => selectedIdSet.has(id) && activeIdSet.has(id));
+        if (!normalized.length) {
+          return NO_ASSIGNED_USERS;
+        }
+        return normalized.length === snapshot.activeUsers.length ? '' : normalized.join(',');
+      }
+      function getFormParams(form) {
+        const params = {};
+        new FormData(form).forEach((value, key) => params[key] = value);
+        return params;
+      }
+      function isNoopAdminAction(params) {
+        if (params.action === 'bulkUpdateProjectStatus') {
+          const ids = new Set(String(params.projectIds || '').split(',').map(value => value.trim()).filter(Boolean));
+          const nextState = params.active === 'true' ? '有効' : '無効';
+          return Array.from(ids).every(id => {
+            const project = snapshot.projects.find(item => String(item.id) === id);
+            return project && project.activeInterpreted === nextState;
+          });
+        }
+        if (params.action === 'updateProjectAssignments') {
+          return normalizeAssignedUserIds(params.assignedUserIds) === normalizeAssignedUserIds(params.originalAssignedUserIds);
+        }
+        if (params.action === 'updateProject') {
+          const project = snapshot.projects.find(item => String(item.id) === String(params.projectId));
+          return project
+            && String(project.activeInterpreted === '有効') === String(params.active === 'true')
+            && normalizeAssignedUserIds(project.assignedUserIds || '') === normalizeAssignedUserIds(params.assignedUserIds || '');
+        }
+        if (params.action === 'updateRoleAllowance') {
+          const row = snapshot.roleAllowances.find(item => String(item.id) === String(params.allowanceId));
+          return row
+            && String(row.name || '') === String(params.allowanceName || '')
+            && String(row.userId || '') === String(params.userId || '')
+            && Number(row.price || 0) === Number(params.price || 0);
+        }
+        if (params.action === 'updateAdminWhitelistEntry') {
+          const row = findAdminWhitelistByParams(params);
+          return row.email
+            && String(Boolean(row.active)) === String(params.active === 'true')
+            && String(row.memo || '') === String(params.memo || '');
+        }
+        if (params.action === 'updateWageUpgrades') {
+          const projectIds = String(params.projectIds || '').split(',').map(value => value.trim()).filter(Boolean);
+          const increments = String(params.increments || '').split(',').map(value => Number(value || 0));
+          return projectIds.every((projectId, index) => {
+            const existing = snapshot.wageUpgrades.find(item => String(item.userId) === String(params.userId) && String(item.projectId) === String(projectId));
+            return Number(existing ? existing.increment : 0) === Number(increments[index] || 0);
+          });
+        }
+        return false;
+      }
+      function refreshProjectAssignmentFields(project) {
+        if (!project) return;
+        const rawAssignedUserIds = String(project.assignedUserIds || '').trim();
+        if (rawAssignedUserIds === NO_ASSIGNED_USERS) {
+          project.assignedInterpreted = '割当なし';
+          project.assignedSummary = '0人';
+          project.assignedDetail = '割当なし';
+          return;
+        }
+        const ids = rawAssignedUserIds.split(',').map(value => value.trim()).filter(Boolean);
+        if (!ids.length) {
+          project.assignedInterpreted = '全員';
+          project.assignedSummary = '全員';
+          project.assignedDetail = '全員';
+          return;
+        }
+        const activeUserById = {};
+        snapshot.activeUsers.forEach(user => activeUserById[String(user.id)] = user);
+        const labels = ids.filter(id => activeUserById[id]).map(id => userLabel(activeUserById[id]));
+        project.assignedInterpreted = labels.join(', ') || '割当なし';
+        project.assignedSummary = `${labels.length}人`;
+        project.assignedDetail = labels.join(', ') || '割当なし';
+      }
+      function applyLocalAdminUpdate(params) {
+        if (params.action === 'updateProject') {
+          const project = findProjectByParams(params);
+          if (!project.id) return false;
+          project.activeInterpreted = params.active === 'true' ? '有効' : '無効';
+          project.assignedUserIds = normalizeAssignedUserIds(params.assignedUserIds || '');
+          if (params.active === 'true' && project.assignedUserIds === NO_ASSIGNED_USERS) {
+            project.assignedUserIds = '';
+          }
+          refreshProjectAssignmentFields(project);
+          return true;
+        }
+        if (params.action === 'bulkUpdateProjectStatus') {
+          const ids = new Set(String(params.projectIds || '').split(',').map(value => value.trim()).filter(Boolean));
+          snapshot.projects.forEach(project => {
+            if (ids.has(String(project.id))) {
+              project.activeInterpreted = params.active === 'true' ? '有効' : '無効';
+              if (params.active === 'true' && String(project.assignedUserIds || '').trim() === NO_ASSIGNED_USERS) {
+                project.assignedUserIds = '';
+                refreshProjectAssignmentFields(project);
+              }
+            }
+          });
+          return true;
+        }
+        if (params.action === 'updateProjectAssignments') {
+          const project = findProjectByParams(params);
+          if (!project.id) return false;
+          project.assignedUserIds = normalizeAssignedUserIds(params.assignedUserIds || '');
+          if (project.assignedUserIds === NO_ASSIGNED_USERS) {
+            project.activeInterpreted = '無効';
+          }
+          refreshProjectAssignmentFields(project);
+          return true;
+        }
+        if (params.action === 'updateRoleAllowance') {
+          const row = findAllowanceByParams(params);
+          if (!row.id) return false;
+          row.name = params.allowanceName;
+          row.userId = params.userId;
+          row.price = Number(params.price || 0);
+          return true;
+        }
+        if (params.action === 'deleteRoleAllowance') {
+          snapshot.roleAllowances = snapshot.roleAllowances.filter(row => String(row.id) !== String(params.allowanceId));
+          return true;
+        }
+        if (params.action === 'addAdminWhitelistEntry') {
+          snapshot.adminWhitelist.push({
+            email: normalizeEmail(params.email),
+            active: true,
+            memo: params.memo || ''
+          });
+          return true;
+        }
+        if (params.action === 'updateAdminWhitelistEntry') {
+          const row = findAdminWhitelistByParams(params);
+          if (!row.email) return false;
+          row.active = params.active === 'true';
+          row.memo = params.memo || '';
+          return true;
+        }
+        if (params.action === 'deleteAdminWhitelistEntry') {
+          snapshot.adminWhitelist = snapshot.adminWhitelist.filter(row => normalizeEmail(row.email) !== normalizeEmail(params.email));
+          return true;
+        }
+        if (params.action === 'updateWageUpgrades') {
+          const projectIds = String(params.projectIds || '').split(',').map(value => value.trim()).filter(Boolean);
+          const increments = String(params.increments || '').split(',').map(value => Number(value || 0));
+          projectIds.forEach((projectId, index) => {
+            let row = snapshot.wageUpgrades.find(item => String(item.userId) === String(params.userId) && String(item.projectId) === String(projectId));
+            if (!row) {
+              row = { id: '', userId: params.userId, projectId: projectId, increment: 0 };
+              snapshot.wageUpgrades.push(row);
+            }
+            row.increment = Number(increments[index] || 0);
+          });
+          return true;
+        }
+        if (params.action === 'remindUnreactedUser' || params.action === 'bulkRemindUnreactedUsers') {
+          return true;
+        }
+        return false;
+      }
+      function shouldRefreshSlackSnapshot(action) {
+        return action === 'setBillForPeriod' || action === 'setBill';
+      }
+      function submitSyntheticAdminAction(params) {
+        if (isNoopAdminAction(params)) {
+          showAdminMessage('変更がないため処理を行いませんでした');
+          return false;
+        }
+        pendingAdminParams = params;
+        openConfirmModal(getConfirmationMessage(params));
+        return false;
+      }
+      function bulkUpdateSelectedProjects(active) {
+        const selector = `.bulk-project-check[data-active-list="${active ? 'false' : 'true'}"]:checked`;
+        const projectIds = Array.from(document.querySelectorAll(selector)).map(input => input.value);
+        if (!projectIds.length) {
+          showAdminMessage('対象PJを選択してください');
+          return false;
+        }
+        return submitSyntheticAdminAction({
+          action: 'bulkUpdateProjectStatus',
+          projectIds: projectIds.join(','),
+          active: active ? 'true' : 'false'
+        });
+      }
+      function bulkRemindSelectedUsers() {
+        const slackUserIds = Array.from(document.querySelectorAll('.bulk-remind-check:checked')).map(input => input.value);
+        if (!slackUserIds.length) {
+          showAdminMessage('対象ユーザーを選択してください');
+          return false;
+        }
+        return submitSyntheticAdminAction({
+          action: 'bulkRemindUnreactedUsers',
+          slackUserIds: slackUserIds.join(',')
+        });
+      }
+      function bulkRemindAllUsers() {
+        const slackUserIds = (snapshot.latestBillReaction.unreactedUsers || []).map(user => user.slackUserId).filter(Boolean);
+        if (!slackUserIds.length) {
+          showAdminMessage('催促対象のユーザーがいません');
+          return false;
+        }
+        return submitSyntheticAdminAction({
+          action: 'bulkRemindUnreactedUsers',
+          slackUserIds: slackUserIds.join(',')
+        });
+      }
+      function refreshLatestBillReaction() {
+        loadingOverlay.classList.add('is-open');
+        google.script.run
+          .withSuccessHandler(function(result) {
+            loadingOverlay.classList.remove('is-open');
+            if (result && result.status === 'success') {
+              snapshot.latestBillReaction = result.latestBillReaction || { message: 'Slackリアクション情報を取得できませんでした', unreactedUsers: [] };
+              renderAdminApp();
+              showAdminMessage('未リアクション一覧を更新しました');
+            } else {
+              showAdminMessage(result && result.message ? result.message : 'Slackリアクション情報の取得に失敗しました');
+            }
+          })
+          .withFailureHandler(function(error) {
+            loadingOverlay.classList.remove('is-open');
+            showAdminMessage(error && error.message ? error.message : String(error || 'Slackリアクション情報の取得に失敗しました'));
+          })
+          .loadLatestBillReactionSnapshot();
+      }
+      function getAggregationLabel(params) {
+        if (params.aggregationPeriod) {
+          const parts = String(params.aggregationPeriod).split('-');
+          return `${Number(parts[0])}年${Number(parts[1])}月`;
+        }
+        const now = new Date();
+        const previous = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+        return `${previous.getFullYear()}年${previous.getMonth() + 1}月`;
+      }
+      function userLabel(user) {
+        if (!user || !user.id) return '';
+        return `${user.id}_${user.name || ''}`;
+      }
+      function userLabelById(userId) {
+        const user = snapshot.activeUsers.find(item => String(item.id) === String(userId));
+        return user ? userLabel(user) : String(userId || '');
+      }
+      function projectLabel(project) {
+        if (!project || !project.id) return '';
+        return `${project.id}_${project.name || ''}`;
+      }
+      function findUserByParams(params) {
+        return snapshot.activeUsers.find(user => String(user.id) === String(params.userId))
+          || snapshot.activeUsers.find(user => String(user.attendanceSheetId) === String(params.attendanceSheetId))
+          || {};
+      }
+      function findProjectByParams(params) {
+        return snapshot.projects.find(project => String(project.id) === String(params.projectId)) || {};
+      }
+      function findAllowanceByParams(params) {
+        return snapshot.roleAllowances.find(row => String(row.id) === String(params.allowanceId)) || {};
+      }
+      function findAdminWhitelistByParams(params) {
+        return (snapshot.adminWhitelist || []).find(row => normalizeEmail(row.email) === normalizeEmail(params.email)) || {};
+      }
+      function getConfirmationMessage(params) {
+        const action = params.action;
+        if (action === 'setBillForPeriod') {
+          return `${getAggregationLabel(params)}分の請求書を一括発行しますか？`;
+        }
+        if (action === 'gatherBillsForPeriod') {
+          return `${getAggregationLabel(params)}分の請求書を一括回収しますか？`;
+        }
+        if (action === 'resetBillForPeriod') {
+          const user = findUserByParams(params);
+          return `${userLabel(user) || '対象ユーザー'}の${getAggregationLabel(params)}分の請求書を再発行しますか？`;
+        }
+        if (action === 'remindUnreactedUser') {
+          const user = snapshot.activeUsers.find(item => String(item.slackUserId) === String(params.slackUserId)) || {};
+          return `${userLabel(user) || params.slackUserId}へSlackで確認催促通知を送信しますか？`;
+        }
+        if (action === 'bulkRemindUnreactedUsers') {
+          const count = String(params.slackUserIds || '').split(',').filter(Boolean).length;
+          return `選択した${count}人へSlackで確認催促通知を送信しますか？`;
+        }
+        if (action === 'deleteUser') {
+          const user = findUserByParams(params);
+          return `${userLabel(user) || '対象ユーザー'}を論理削除しますか？`;
+        }
+        if (action === 'addProject') {
+          return `PJ「${params.projectName || ''}」を追加しますか？`;
+        }
+        if (action === 'updateProject') {
+          const project = findProjectByParams(params);
+          return `PJ「${projectLabel(project) || params.projectId}」を${params.active === 'true' ? '有効化' : '無効化'}しますか？`;
+        }
+        if (action === 'bulkUpdateProjectStatus') {
+          const count = String(params.projectIds || '').split(',').filter(Boolean).length;
+          return `選択した${count}件のPJを${params.active === 'true' ? '有効化' : '無効化'}しますか？`;
+        }
+        if (action === 'updateProjectAssignments') {
+          const project = findProjectByParams(params);
+          if (normalizeAssignedUserIds(params.assignedUserIds) === NO_ASSIGNED_USERS) {
+            return `PJ「${projectLabel(project) || params.projectId}」の割当が0人になるため、PJを無効化しますか？`;
+          }
+          return `PJ「${projectLabel(project) || params.projectId}」の割当を更新しますか？`;
+        }
+        if (action === 'updateWageUpgrades') {
+          const user = findUserByParams(params);
+          return `${userLabel(user) || params.userId}の時給増分を保存しますか？`;
+        }
+        if (action === 'addRoleAllowance') {
+          const user = findUserByParams(params);
+          return `${userLabel(user) || params.userId}へ役職手当「${params.allowanceName || ''}」を追加しますか？`;
+        }
+        if (action === 'updateRoleAllowance') {
+          const row = findAllowanceByParams(params);
+          return `役職手当「${row.name || params.allowanceName || params.allowanceId}」を保存しますか？`;
+        }
+        if (action === 'deleteRoleAllowance') {
+          const row = findAllowanceByParams(params);
+          return `役職手当「${row.name || params.allowanceId}」を論理削除しますか？`;
+        }
+        if (action === 'addAdminWhitelistEntry') {
+          return `${params.email || ''}を管理者に追加しますか？`;
+        }
+        if (action === 'updateAdminWhitelistEntry') {
+          return `${params.email || ''}を${params.active === 'true' ? '有効化' : '無効化'}しますか？`;
+        }
+        if (action === 'deleteAdminWhitelistEntry') {
+          return `${params.email || ''}を管理者一覧から削除しますか？`;
+        }
+        return 'この操作を実行しますか？';
+      }
+      function table(headers, rows, profile = 'standard') {
+        return `<div class="table-responsive"><table class="table table-sm table-striped admin-table"><colgroup>${colGroup(profile, headers.length)}</colgroup><thead><tr>${headers.map(h => `<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.map(row => `<tr>${row.map(cell => `<td>${isHtmlCell(cell) ? cell : esc(cell)}</td>`).join('')}</tr>`).join('') || `<tr><td colspan="${headers.length}">データがありません</td></tr>`}</tbody></table></div>`;
+      }
+      function colGroup(profile, count) {
+        if (profile === 'adminWhitelist' && count === 4) {
+          return '<col style="width:45%"><col style="width:10%"><col style="width:20%"><col style="width:25%">';
+        }
+        if (profile === 'bulk' && count === 6) {
+          return '<col style="width:4%"><col style="width:10%"><col style="width:24%"><col style="width:16%"><col style="width:21%"><col style="width:25%">';
+        }
+        if (profile === 'bulk' && count === 5) {
+          return '<col style="width:4%"><col style="width:10%"><col style="width:24%"><col style="width:37%"><col style="width:25%">';
+        }
+        if (profile === 'standard' && count === 5) {
+          return '<col style="width:12.5%"><col style="width:25%"><col style="width:18.75%"><col style="width:18.75%"><col style="width:25%">';
+        }
+        if (profile === 'standard' && count === 4) {
+          return '<col style="width:12.5%"><col style="width:25%"><col style="width:37.5%"><col style="width:25%">';
+        }
+        return Array.from({ length: count }).map(() => `<col style="width:${100 / count}%">`).join('');
+      }
+      function actionGroup(html) {
+        return `<div class="admin-actions">${html}</div>`;
+      }
+      function isHtmlCell(value) {
+        return String(value || '').trim().startsWith('<');
+      }
+      function esc(value) {
+        return String(value || '').replace(/[&<>"']/g, match => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[match]));
+      }
+      function escAttr(value) {
+        return esc(value).replace(/`/g, '&#96;');
+      }
+      function normalizeEmail(value) {
+        return String(value || '').trim().toLowerCase();
+      }
+      function formatSlackTs(ts) {
+        if (!ts) return '';
+        const date = new Date(Number(String(ts).split('.')[0]) * 1000);
+        if (isNaN(date.getTime())) return '';
+        return `${date.getFullYear()}/${String(date.getMonth() + 1).padStart(2, '0')}/${String(date.getDate()).padStart(2, '0')} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+      }
+      modal.addEventListener('click', function(event) {
+        if (event.target === modal) closeModal();
+      });
+      confirmModal.addEventListener('click', function(event) {
+        if (event.target === confirmModal) closeConfirmModal();
+      });
+      function showAdminMessage(message) {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        document.getElementById('adminMessage').textContent = message || '';
+      }
+      function prepareAdminParams(form) {
+        if (form.querySelector('[name="action"][value="updateProjectAssignments"]')) {
+          syncAssignedUsers();
+        }
+        if (form.querySelector('[name="action"][value="updateWageUpgrades"]')) {
+          syncWageInputs();
+        }
+        return getFormParams(form);
+      }
+      function submitAdminForm(event) {
+        event.preventDefault();
+        const form = event.target;
+        const params = prepareAdminParams(form);
+        if (isNoopAdminAction(params)) {
+          closeModal();
+          showAdminMessage('変更がないため処理を行いませんでした');
+          return false;
+        }
+        pendingAdminParams = params;
+        openConfirmModal(getConfirmationMessage(params));
+        return false;
+      }
+      function executeConfirmedAdminAction() {
+        const params = pendingAdminParams;
+        if (!params) {
+          closeConfirmModal();
+          return false;
+        }
+        closeConfirmModal();
+        loadingOverlay.classList.add('is-open');
+        google.script.run
+          .withSuccessHandler(function(result) {
+            const message = result && result.message ? result.message : '完了しました';
+            if (result && result.status === 'error') {
+              loadingOverlay.classList.remove('is-open');
+              showAdminMessage(message);
+              return;
+            }
+            if (applyLocalAdminUpdate(params)) {
+              renderAdminApp();
+              closeModal();
+              loadingOverlay.classList.remove('is-open');
+              showAdminMessage(message);
+              return;
+            }
+            google.script.run
+              .withSuccessHandler(function(snapshotResult) {
+                if (snapshotResult && snapshotResult.status === 'success') {
+                  const previousLatestBillReaction = snapshot.latestBillReaction;
+                  snapshot = snapshotResult.snapshot || {};
+                  if (!snapshot.latestBillReaction) {
+                    snapshot.latestBillReaction = previousLatestBillReaction;
+                  }
+                  renderAdminApp();
+                }
+                closeModal();
+                loadingOverlay.classList.remove('is-open');
+                showAdminMessage(message);
+              })
+              .withFailureHandler(function(error) {
+                loadingOverlay.classList.remove('is-open');
+                showAdminMessage(error && error.message ? error.message : String(error || '再読み込みに失敗しました'));
+              })
+              .loadAdminSnapshot({ includeLatestBillReaction: shouldRefreshSlackSnapshot(params.action) });
+          })
+          .withFailureHandler(function(error) {
+            loadingOverlay.classList.remove('is-open');
+            showAdminMessage(error && error.message ? error.message : String(error || '処理に失敗しました'));
+          })
+          .runAdminAction(params);
+        return false;
+      }
+    </script>
+    <? } ?>
+  </body>
+</html>

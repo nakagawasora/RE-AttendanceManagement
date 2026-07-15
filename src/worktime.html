@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <meta charset="utf-8">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  </head>
+  <body>
+    <div class="container" style="max-width: 920px;">
+      <h2 class="text-center m-4">実績</h2>
+      <div id="app"></div>
+    </div>
+    <script>
+      const result = <?!= resultJson ?>;
+      const app = document.getElementById('app');
+      const deployURL = <?= JSON.stringify(deployURL) ?>;
+      const email = <?= JSON.stringify(email) ?>;
+      const password = <?= JSON.stringify(password) ?>;
+      const apiToken = <?= JSON.stringify(apiToken) ?>;
+      const currentMonthValue = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
+
+      if (result.status !== 'success') {
+        app.innerHTML = `<p class="text-danger">${escapeHtml(result.message || '取得に失敗しました')}</p>`;
+      } else {
+        const data = result.data;
+        const rows = (data.lineItems || []).map(item => `
+          <tr>
+            <td>${item.type === 'allowance' ? '手当' : 'PJ'}</td>
+            <td>${escapeHtml(item.name)}</td>
+            <td class="text-end">${Number(item.unitPrice).toLocaleString()}円</td>
+            <td>${escapeHtml(item.workTime)}</td>
+            <td class="text-end">${Number(item.amount).toLocaleString()}円</td>
+            <td class="text-end">${Number(item.amountWithTax).toLocaleString()}円</td>
+          </tr>
+        `).join('');
+        const previous = previousMonth(data.year, data.month);
+
+        app.innerHTML = `
+          <h4>${data.summary}</h4>
+          <p class="text-muted">現時点で登録されている時給・手当を用いた参考値です。</p>
+          <table class="table table-striped mt-3">
+            <thead><tr><th>種別</th><th>名前</th><th class="text-end">単価</th><th>勤務時間</th><th class="text-end">税抜金額</th><th class="text-end">税込金額</th></tr></thead>
+            <tbody>${rows || '<tr><td colspan="6">勤務実績はありません</td></tr>'}</tbody>
+          </table>
+          <div class="fs-4 text-end mt-4">税込合計 ${Number(data.totalAmount).toLocaleString()}円</div>
+          <div class="d-flex flex-wrap gap-3 mt-4 align-items-end">
+            <div>${worktimeForm(`<input type="hidden" name="month" value="${previous.month}"><input type="hidden" name="year" value="${previous.year}"><button class="btn btn-outline-primary text-nowrap">前月を見る</button>`)}</div>
+            <div class="ms-auto">${worktimeForm(`<div class="d-flex gap-2 align-items-end"><div><label class="form-label small text-muted mb-1">年月を指定</label><input class="form-control" type="month" name="monthForWorkTime" max="${currentMonthValue}"></div><button class="btn btn-outline-primary text-nowrap">指定年月を見る</button></div>`)}</div>
+          </div>
+        `;
+      }
+
+      function worktimeForm(inner) {
+        return `<form method="GET" action="${deployURL}">
+          <input type="hidden" name="view" value="worktime">
+          <input type="hidden" name="email" value="${escapeHtml(email)}">
+          ${password ? `<input type="hidden" name="password" value="${escapeHtml(password)}">` : ''}
+          ${apiToken ? `<input type="hidden" name="apiToken" value="${escapeHtml(apiToken)}">` : ''}
+          ${inner}
+        </form>`;
+      }
+      function previousMonth(year, month) {
+        const date = new Date(Number(year), Number(month) - 2, 1);
+        return { year: date.getFullYear(), month: date.getMonth() + 1 };
+      }
+      function escapeHtml(value) {
+        return String(value || '').replace(/[&<>"']/g, (match) => ({
+          '&': '&amp;',
+          '<': '&lt;',
+          '>': '&gt;',
+          '"': '&quot;',
+          "'": '&#39;'
+        }[match]));
+      }
+    </script>
+  </body>
+</html>
