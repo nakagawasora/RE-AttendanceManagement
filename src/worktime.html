@@ -16,7 +16,6 @@
       const deployURL = <?= JSON.stringify(deployURL) ?>;
       const email = <?= JSON.stringify(email) ?>;
       const password = <?= JSON.stringify(password) ?>;
-      const apiToken = <?= JSON.stringify(apiToken) ?>;
       const currentMonthValue = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
 
       if (result.status !== 'success') {
@@ -54,8 +53,7 @@
         return `<form method="GET" action="${deployURL}">
           <input type="hidden" name="view" value="worktime">
           <input type="hidden" name="email" value="${escapeHtml(email)}">
-          ${password ? `<input type="hidden" name="password" value="${escapeHtml(password)}">` : ''}
-          ${apiToken ? `<input type="hidden" name="apiToken" value="${escapeHtml(apiToken)}">` : ''}
+          <input type="hidden" name="password" value="${escapeHtml(password)}">
           ${inner}
         </form>`;
       }

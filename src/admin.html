@@ -210,7 +210,7 @@
         ${section('ユーザー', `
           ${table(['ID','名前','Email','SlackID','操作'], snapshot.activeUsers.map(user => [
             user.id, user.name, user.email, user.slackUserId,
-            actionGroup(`${periodForm('resetBillForPeriod', '再発行', `<input type="hidden" name="attendanceSheetId" value="${esc(user.attendanceSheetId)}">`, 'btn-sm btn-outline-primary action-btn-sm')}${postForm(`<input type="hidden" name="action" value="deleteUser"><input type="hidden" name="userId" value="${esc(user.id)}"><button class="btn btn-sm btn-outline-danger action-btn-sm">論理削除</button>`)}`)
+            actionGroup(`<button class="btn btn-sm btn-outline-secondary action-btn-sm" type="button" onclick="openUserNameModal('${escAttr(user.id)}')">名前編集</button>${periodForm('resetBillForPeriod', '再発行', `<input type="hidden" name="attendanceSheetId" value="${esc(user.attendanceSheetId)}">`, 'btn-sm btn-outline-primary action-btn-sm')}${postForm(`<input type="hidden" name="action" value="deleteUser"><input type="hidden" name="userId" value="${esc(user.id)}"><button class="btn btn-sm btn-outline-danger action-btn-sm">論理削除</button>`)}`)
           ]), 'standard')}
         `)}
         ${section('PJ', `
@@ -425,6 +425,25 @@
         `);
       }
 
+      function openUserNameModal(userId) {
+        const user = snapshot.activeUsers.find(item => String(item.id) === String(userId));
+        if (!user) return;
+        openModal(`
+          <div class="modal-body-form">
+            <h5 class="modal-title-lite">${esc(userLabel(user) || user.id)}の名前編集</h5>
+            ${postForm(`
+              <input type="hidden" name="action" value="updateUserName">
+              <input type="hidden" name="userId" value="${esc(user.id)}">
+              <div class="mb-3">
+                <label class="form-label">名前</label>
+                <input class="form-control" name="name" value="${esc(user.name || '')}" maxlength="100">
+              </div>
+              <div class="d-flex justify-content-between mt-4"><button class="btn btn-outline-secondary action-btn" type="button" onclick="closeModal()">キャンセル</button><button class="btn btn-primary action-btn">保存</button></div>
+            `, 'admin-form-full')}
+          </div>
+        `);
+      }
+
       function openRoleModal(id) {
         const row = snapshot.roleAllowances.find(item => String(item.id) === String(id));
         openModal(`
@@ -567,6 +586,10 @@
             && String(row.userId || '') === String(params.userId || '')
             && Number(row.price || 0) === Number(params.price || 0);
         }
+        if (params.action === 'updateUserName') {
+          const user = findUserByParams(params);
+          return user.id && String(user.name || '') === String(params.name || '');
+        }
         if (params.action === 'updateAdminWhitelistEntry') {
           const row = findAdminWhitelistByParams(params);
           return row.email
@@ -647,6 +670,13 @@
           row.name = params.allowanceName;
           row.userId = params.userId;
           row.price = Number(params.price || 0);
+          return true;
+        }
+        if (params.action === 'updateUserName') {
+          const user = findUserByParams(params);
+          if (!user.id) return false;
+          user.name = params.name || '';
+          snapshot.projects.forEach(project => refreshProjectAssignmentFields(project));
           return true;
         }
         if (params.action === 'deleteRoleAllowance') {
@@ -814,6 +844,10 @@
         if (action === 'deleteUser') {
           const user = findUserByParams(params);
           return `${userLabel(user) || '対象ユーザー'}を論理削除しますか？`;
+        }
+        if (action === 'updateUserName') {
+          const user = findUserByParams(params);
+          return `${userLabel(user) || params.userId}の名前を「${params.name || ''}」に変更しますか？`;
         }
         if (action === 'addProject') {
           return `PJ「${params.projectName || ''}」を追加しますか？`;

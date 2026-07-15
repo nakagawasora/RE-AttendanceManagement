@@ -6,7 +6,6 @@ const slackIdOfAdmin = scriptProperties.getProperty("SLACK_ID_OF_ADMIN");
 const mailAddress = scriptProperties.getProperty("MAIL_ADDRESS");
 const ccRecipient = scriptProperties.getProperty("CC_RECIPIENT");
 const billFolderId = scriptProperties.getProperty("BILL_FOLDER_ID");
-const apiToken = scriptProperties.getProperty("API_TOKEN");
 
 const USER_COL = {
   id: 1,
@@ -32,14 +31,87 @@ const NO_ASSIGNED_USERS = '__NONE__';
 const ADMIN_EXECUTION_LOG_SHEET_NAME = 'AdminExecutionLogs';
 const ADMIN_WHITELIST_SHEET_NAME = 'AdminWhitelist';
 const DATABASE_META_SHEET_NAMES = [ADMIN_EXECUTION_LOG_SHEET_NAME, ADMIN_WHITELIST_SHEET_NAME];
+const DATABASE_CORE_SHEET_DEFINITIONS = [
+  {
+    key: 'users',
+    name: 'Users',
+    aliases: ['Users', 'User', 'ID', 'ユーザー', 'ユーザ', 'ユーザー一覧', 'Usersシート'],
+    headers: ['id', 'attendanceSheetId', 'slackUserId', 'driveFolderId', 'addressSheetId', 'email', 'passwordHash', 'savedData', 'name', 'deletedAt'],
+    headerAliases: [
+      ['id', 'user_id', 'ユーザーid', 'ユーザid'],
+      ['attendancesheetid', '勤怠シートid', '出席シートid'],
+      ['slackuserid', 'slackid', 'slackユーザーid'],
+      ['drivefolderid', 'outputfolderid', '請求書出力先フォルダid', 'フォルダid'],
+      ['addresssheetid', '個人情報シートid', '住所シートid'],
+      ['email', 'mail', 'メール', 'メールアドレス'],
+      ['passwordhash', 'password', 'パスワードハッシュ'],
+      ['saveddata', 'store', '一時保存', '一時保存データ'],
+      ['name', '名前', '氏名'],
+      ['deletedat', '論理削除', '削除日時']
+    ],
+    validators: ['id', 'spreadsheetId', 'slackUserIdOrBlank', 'driveId', 'spreadsheetId', 'email', 'sha256Hash', 'jsonOrBlank', 'textOrBlank', 'dateOrBlank'],
+    minColumns: 10
+  },
+  {
+    key: 'projects',
+    name: 'Projects',
+    aliases: ['Projects', 'Project', 'PJ', 'PJs', 'プロジェクト', 'プロジェクト一覧', 'Projectsシート'],
+    headers: ['id', 'name', 'hourlyWage', 'active', 'assignedUserIds'],
+    headerAliases: [
+      ['id', 'project_id', 'pjid', 'プロジェクトid', 'pj id'],
+      ['name', 'projectname', 'pj名', 'プロジェクト名', '名前'],
+      ['hourlywage', '時給', '時給税抜き', '基本時給'],
+      ['active', '状態', '有効', 'アクティブ'],
+      ['assigneduserids', '対象ユーザーid', '割当ユーザーid', 'フォーム表示対象user_id']
+    ],
+    validators: ['id', 'text', 'number', 'statusOrBlank', 'assignedUserIdsOrBlank'],
+    minColumns: 5
+  },
+  {
+    key: 'wageUpgrades',
+    name: 'WageUpgrades',
+    aliases: ['WageUpgrades', 'WageUpgrade', 'HourlyWageIncrements', 'upgrade', '時給増分', '時給アップ', '時給アップシート'],
+    headers: ['id', 'userId', 'projectId', 'increment'],
+    headerAliases: [
+      ['id'],
+      ['userid', 'user_id', 'ユーザーid'],
+      ['projectid', 'project_id', 'pjid', 'プロジェクトid', '対象pjid'],
+      ['increment', '時給増分', '時給加算額', '増分', '増分税抜き']
+    ],
+    validators: ['id', 'id', 'id', 'number'],
+    minColumns: 4
+  },
+  {
+    key: 'roleAllowances',
+    name: 'RoleAllowances',
+    aliases: ['RoleAllowances', 'RoleAllowance', '役職手当', '役職手当シート'],
+    headers: ['id', 'name', 'userId', 'price', 'deletedAt'],
+    headerAliases: [
+      ['id'],
+      ['name', '手当名', '役職手当名'],
+      ['userid', 'user_id', '対象ユーザーid', '対象user_id'],
+      ['price', '単価', '手当', '金額'],
+      ['deletedat', '論理削除', '削除日時']
+    ],
+    validators: ['id', 'text', 'id', 'number', 'dateOrBlank'],
+    minColumns: 5
+  }
+];
 
 function openDatabaseSpreadsheet() {
   return SpreadsheetApp.openById(BillUtil.databaseSheetId);
 }
 
 function getDatabaseSheets() {
-  return openDatabaseSpreadsheet().getSheets()
-    .filter(sheet => !DATABASE_META_SHEET_NAMES.includes(sheet.getName()));
+  const database = openDatabaseSpreadsheet();
+  const selectedSheets = selectDatabaseCoreSheets(database);
+  return DATABASE_CORE_SHEET_DEFINITIONS.map((definition, index) => {
+    const sheet = selectedSheets[index].sheet;
+    if (!sheet) {
+      throw new Error(`${definition.name}シートが見つかりません`);
+    }
+    return sheet;
+  });
 }
 
 function getDatabaseSheet(index) {
@@ -50,8 +122,247 @@ function getDatabaseSheet(index) {
   return sheet;
 }
 
+function getOrderedNonMetaDatabaseSheets(database) {
+  return database.getSheets()
+    .filter(sheet => !DATABASE_META_SHEET_NAMES.includes(sheet.getName()));
+}
+
+function normalizeSheetNameForLookup(name) {
+  return String(name || '').trim().toLowerCase().replace(/\s+/g, '');
+}
+
+function findDatabaseSheetByDefinition(database, definition) {
+  const aliases = definition.aliases.map(normalizeSheetNameForLookup);
+  return database.getSheets().find(sheet => aliases.includes(normalizeSheetNameForLookup(sheet.getName()))) || null;
+}
+
+function selectDatabaseCoreSheets(database) {
+  const candidateSheets = getOrderedNonMetaDatabaseSheets(database);
+  const usedSheetIds = {};
+  return DATABASE_CORE_SHEET_DEFINITIONS.map((definition, index) => {
+    const candidates = candidateSheets
+      .filter(sheet => !usedSheetIds[sheet.getSheetId()])
+      .map(sheet => buildDatabaseSheetCandidateScore(sheet, definition, index))
+      .sort((a, b) => b.score - a.score);
+    const selected = candidates[0] || {
+      sheet: null,
+      matchedBy: 'missing',
+      score: 0,
+      diagnostics: buildEmptyDatabaseSheetDiagnostics(definition)
+    };
+    if (selected.sheet) {
+      usedSheetIds[selected.sheet.getSheetId()] = true;
+    }
+    return selected;
+  });
+}
+
+function buildDatabaseSheetCandidateScore(sheet, definition, expectedIndex) {
+  const nameMatched = Boolean(findDatabaseSheetByDefinition({ getSheets: () => [sheet] }, definition));
+  const headerDiagnostics = inspectDatabaseSheetHeader(sheet, definition);
+  const dataDiagnostics = inspectDatabaseSheetFirstDataRow(sheet, definition);
+  const fallbackIndexMatched = getOrderedNonMetaDatabaseSheets(sheet.getParent())[expectedIndex] === sheet;
+  const headerScore = headerDiagnostics.matchedCount * 8;
+  const dataScore = dataDiagnostics.validCount * 12;
+  const nameScore = nameMatched ? 120 : 0;
+  const fallbackScore = fallbackIndexMatched ? 8 : 0;
+  const score = nameScore + headerScore + dataScore + fallbackScore;
+  let matchedBy = 'structure';
+  if (nameMatched && dataDiagnostics.ok) {
+    matchedBy = 'name_and_data';
+  } else if (nameMatched) {
+    matchedBy = 'name';
+  } else if (dataDiagnostics.ok) {
+    matchedBy = 'data';
+  } else if (fallbackIndexMatched) {
+    matchedBy = 'legacy_index';
+  }
+  return {
+    sheet,
+    matchedBy,
+    score,
+    diagnostics: {
+      header: headerDiagnostics,
+      firstDataRow: dataDiagnostics,
+      fallbackIndexMatched
+    }
+  };
+}
+
+function buildEmptyDatabaseSheetDiagnostics(definition) {
+  return {
+    header: {
+      ok: false,
+      matchedCount: 0,
+      checkedCount: definition.minColumns,
+      mismatchedColumns: definition.headers
+    },
+    firstDataRow: {
+      ok: false,
+      rowFound: false,
+      validCount: 0,
+      checkedCount: definition.minColumns,
+      invalidColumns: definition.headers
+    },
+    fallbackIndexMatched: false
+  };
+}
+
+function inspectDatabaseSheetHeader(sheet, definition) {
+  if (!sheet || sheet.getLastColumn() < 1) {
+    return {
+      ok: false,
+      matchedCount: 0,
+      checkedCount: definition.minColumns,
+      mismatchedColumns: definition.headers
+    };
+  }
+  const width = Math.min(sheet.getLastColumn(), definition.minColumns);
+  const headerRow = sheet.getRange(1, 1, 1, width).getValues()[0];
+  const mismatchedColumns = [];
+  let matchedCount = 0;
+  for (let i = 0; i < definition.minColumns; i++) {
+    const normalizedHeader = normalizeHeaderLabelForLookup(headerRow[i]);
+    const aliases = (definition.headerAliases[i] || [definition.headers[i]]).map(normalizeHeaderLabelForLookup);
+    if (normalizedHeader && aliases.includes(normalizedHeader)) {
+      matchedCount++;
+    } else {
+      mismatchedColumns.push(definition.headers[i]);
+    }
+  }
+  return {
+    ok: matchedCount === definition.minColumns,
+    matchedCount,
+    checkedCount: definition.minColumns,
+    mismatchedColumns
+  };
+}
+
+function inspectDatabaseSheetFirstDataRow(sheet, definition) {
+  if (!sheet || sheet.getLastRow() < 2 || sheet.getLastColumn() < 1) {
+    return {
+      ok: false,
+      rowFound: false,
+      validCount: 0,
+      checkedCount: definition.minColumns,
+      invalidColumns: definition.headers
+    };
+  }
+  const rowCount = Math.min(sheet.getLastRow() - 1, 20);
+  const width = Math.min(sheet.getLastColumn(), definition.minColumns);
+  const values = sheet.getRange(2, 1, rowCount, width).getValues();
+  const firstDataRow = values
+    .map(row => row.concat(Array(Math.max(definition.minColumns - row.length, 0)).fill('')))
+    .find(row => row.some(cell => cell !== '' && cell !== null && typeof cell !== 'undefined'));
+  if (!firstDataRow) {
+    return {
+      ok: false,
+      rowFound: false,
+      validCount: 0,
+      checkedCount: definition.minColumns,
+      invalidColumns: definition.headers
+    };
+  }
+
+  const invalidColumns = [];
+  let validCount = 0;
+  for (let i = 0; i < definition.minColumns; i++) {
+    const validatorName = definition.validators[i];
+    if (validateDatabaseCellForMigration(validatorName, firstDataRow[i])) {
+      validCount++;
+    } else {
+      invalidColumns.push(definition.headers[i]);
+    }
+  }
+  return {
+    ok: invalidColumns.length === 0,
+    rowFound: true,
+    validCount,
+    checkedCount: definition.minColumns,
+    invalidColumns
+  };
+}
+
+function normalizeHeaderLabelForLookup(label) {
+  return String(label || '').trim().toLowerCase().replace(/[\s_（）()・:：-]/g, '');
+}
+
+function validateDatabaseCellForMigration(validatorName, value) {
+  if (validatorName === 'id') {
+    return isNonEmptyCell(value);
+  }
+  if (validatorName === 'text') {
+    return typeof value === 'string' && value.trim() !== '';
+  }
+  if (validatorName === 'textOrBlank') {
+    return isBlankCell(value) || typeof value === 'string';
+  }
+  if (validatorName === 'number') {
+    return value !== '' && value !== null && !Number.isNaN(Number(value));
+  }
+  if (validatorName === 'email') {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || '').trim());
+  }
+  if (validatorName === 'sha256Hash') {
+    return /^[a-f0-9]{64}$/i.test(String(value || '').trim());
+  }
+  if (validatorName === 'slackUserIdOrBlank') {
+    const text = String(value || '').trim();
+    return !text || /^[UW][A-Z0-9]{8,}$/.test(text);
+  }
+  if (validatorName === 'spreadsheetId' || validatorName === 'driveId') {
+    return /^[A-Za-z0-9_-]{20,}$/.test(String(value || '').trim());
+  }
+  if (validatorName === 'jsonOrBlank') {
+    const text = String(value || '').trim();
+    if (!text) {
+      return true;
+    }
+    try {
+      JSON.parse(text);
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+  if (validatorName === 'dateOrBlank') {
+    return isBlankCell(value) || value instanceof Date || !Number.isNaN(Date.parse(value));
+  }
+  if (validatorName === 'statusOrBlank') {
+    return isBlankCell(value) || ['true', 'false', '有効', '無効', 'active', 'inactive', '1', '0'].includes(String(value).trim().toLowerCase());
+  }
+  if (validatorName === 'assignedUserIdsOrBlank') {
+    const text = String(value || '').trim();
+    return !text || text === NO_ASSIGNED_USERS || text.split(',').every(id => String(id).trim() !== '');
+  }
+  return true;
+}
+
+function isBlankCell(value) {
+  return value === '' || value === null || typeof value === 'undefined';
+}
+
+function isNonEmptyCell(value) {
+  return !isBlankCell(value) && String(value).trim() !== '';
+}
+
+function getDatabaseSheetByKey(key) {
+  const index = DATABASE_CORE_SHEET_DEFINITIONS.findIndex(definition => definition.key === key);
+  if (index < 0) {
+    throw new Error(`未知のデータベースシートキーです: ${key}`);
+  }
+  return getDatabaseSheet(index);
+}
+
 function repairDatabaseSheetOrder() {
   const database = openDatabaseSpreadsheet();
+  selectDatabaseCoreSheets(database).forEach((selected, index) => {
+    const sheet = selected.sheet;
+    if (sheet) {
+      database.setActiveSheet(sheet);
+      database.moveActiveSheet(index + 1);
+    }
+  });
   const adminWhitelistSheet = database.getSheetByName(ADMIN_WHITELIST_SHEET_NAME);
   if (adminWhitelistSheet) {
     database.setActiveSheet(adminWhitelistSheet);
@@ -62,6 +373,198 @@ function repairDatabaseSheetOrder() {
     database.setActiveSheet(logSheet);
     database.moveActiveSheet(database.getNumSheets());
   }
+}
+
+function migrateDatabaseToNamedSheets(sourceSpreadsheetId, targetSpreadsheetName) {
+  const sourceId = sourceSpreadsheetId || BillUtil.databaseSheetId;
+  if (!sourceId) {
+    throw new Error('sourceSpreadsheetId または DATABASE_SHEET_ID が必要です');
+  }
+
+  const source = SpreadsheetApp.openById(sourceId);
+  const target = SpreadsheetApp.create(targetSpreadsheetName || `AM Database Migrated ${Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyyMMdd_HHmmss')}`);
+  const defaultSheet = target.getSheets()[0];
+  const selectedSourceSheets = selectDatabaseCoreSheets(source);
+  const migrated = [];
+  const warnings = [];
+
+  DATABASE_CORE_SHEET_DEFINITIONS.forEach((definition, index) => {
+    const selectedSource = selectedSourceSheets[index];
+    const sourceSheet = selectedSource.sheet;
+    let targetSheet;
+    if (sourceSheet) {
+      targetSheet = sourceSheet.copyTo(target);
+      targetSheet.setName(definition.name);
+      migrated.push({
+        targetName: definition.name,
+        sourceSheetName: sourceSheet.getName(),
+        matchedBy: selectedSource.matchedBy,
+        headerOk: selectedSource.diagnostics.header.ok,
+        firstDataRowOk: selectedSource.diagnostics.firstDataRow.ok,
+        invalidColumns: selectedSource.diagnostics.firstDataRow.invalidColumns,
+        mismatchedHeaderColumns: selectedSource.diagnostics.header.mismatchedColumns
+      });
+    } else {
+      targetSheet = target.insertSheet(definition.name);
+      warnings.push(`${definition.name} は移行元に見つからなかったため空シートを作成しました`);
+    }
+    normalizeMigratedCoreSheet(targetSheet, definition);
+    target.setActiveSheet(targetSheet);
+    target.moveActiveSheet(index + 1);
+  });
+
+  migrateOrCreateMetaSheet_(source, target, ADMIN_WHITELIST_SHEET_NAME, ['email', 'active', 'memo']);
+  migrateOrCreateMetaSheet_(source, target, ADMIN_EXECUTION_LOG_SHEET_NAME, ['timestamp', 'action', 'period', 'status', 'message', 'operatorEmail']);
+
+  if (defaultSheet && target.getSheets().length > 1) {
+    target.deleteSheet(defaultSheet);
+  }
+
+  const adminWhitelistSheet = target.getSheetByName(ADMIN_WHITELIST_SHEET_NAME);
+  if (adminWhitelistSheet && adminWhitelistSheet.getLastRow() < 2) {
+    const activeEmail = getActiveUserEmail();
+    if (activeEmail) {
+      adminWhitelistSheet.appendRow([normalizeEmailForAdmin(activeEmail), true, 'migration initial admin']);
+    } else {
+      warnings.push('AdminWhitelist が空です。管理者メールアドレスを手動で追加してください');
+    }
+  }
+
+  return {
+    status: 'success',
+    sourceSpreadsheetId: sourceId,
+    targetSpreadsheetId: target.getId(),
+    targetUrl: target.getUrl(),
+    migrated,
+    warnings,
+    nextStep: `スクリプトプロパティ DATABASE_SHEET_ID を ${target.getId()} に変更してください`
+  };
+}
+
+function migrateDatabaseToNamedSheetsAndUseIt(sourceSpreadsheetId, targetSpreadsheetName) {
+  const result = migrateDatabaseToNamedSheets(sourceSpreadsheetId, targetSpreadsheetName);
+  PropertiesService.getScriptProperties().setProperty('DATABASE_SHEET_ID', result.targetSpreadsheetId);
+  BillUtil.databaseSheetId = result.targetSpreadsheetId;
+  result.nextStep = 'DATABASE_SHEET_ID を移行後スプレッドシートに更新しました';
+  return result;
+}
+
+function normalizeMigratedCoreSheet(sheet, definition) {
+  ensureSheetMinColumns_(sheet, definition.minColumns);
+  sheet.getRange(1, 1, 1, definition.headers.length).setValues([definition.headers]);
+  if (definition.key === 'projects') {
+    normalizeMigratedProjectSheet_(sheet);
+  }
+}
+
+function normalizeMigratedProjectSheet_(sheet) {
+  if (sheet.getLastRow() < 2) {
+    return;
+  }
+  const rowCount = sheet.getLastRow() - 1;
+  const values = sheet.getRange(2, 1, rowCount, PROJECT_COL.assignedUserIds).getValues();
+  let changed = false;
+  values.forEach(row => {
+    const hasProject = row[PROJECT_COL.id - 1] || row[PROJECT_COL.name - 1];
+    if (hasProject && (row[PROJECT_COL.active - 1] === '' || row[PROJECT_COL.active - 1] === null || typeof row[PROJECT_COL.active - 1] === 'undefined')) {
+      row[PROJECT_COL.active - 1] = true;
+      changed = true;
+    }
+  });
+  if (changed) {
+    sheet.getRange(2, 1, rowCount, PROJECT_COL.assignedUserIds).setValues(values);
+  }
+}
+
+function migrateOrCreateMetaSheet_(source, target, sheetName, headers) {
+  const sourceSheet = source.getSheetByName(sheetName);
+  let targetSheet;
+  if (sourceSheet) {
+    targetSheet = sourceSheet.copyTo(target);
+    targetSheet.setName(sheetName);
+  } else {
+    targetSheet = target.insertSheet(sheetName);
+  }
+  ensureSheetMinColumns_(targetSheet, headers.length);
+  targetSheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  target.setActiveSheet(targetSheet);
+  target.moveActiveSheet(target.getNumSheets());
+  return targetSheet;
+}
+
+function ensureSheetMinColumns_(sheet, minColumns) {
+  if (sheet.getMaxColumns() < minColumns) {
+    sheet.insertColumnsAfter(sheet.getMaxColumns(), minColumns - sheet.getMaxColumns());
+  }
+}
+
+function validateNamedDatabaseSheets(spreadsheetId) {
+  const database = SpreadsheetApp.openById(spreadsheetId || BillUtil.databaseSheetId);
+  const selectedSheets = selectDatabaseCoreSheets(database);
+  const result = DATABASE_CORE_SHEET_DEFINITIONS.map((definition, index) => {
+    const selected = selectedSheets[index];
+    const sheet = selected.sheet;
+    return {
+      key: definition.key,
+      expectedName: definition.name,
+      actualName: sheet ? sheet.getName() : '',
+      matchedBy: selected.matchedBy,
+      rowCount: sheet ? sheet.getLastRow() : 0,
+      columnCount: sheet ? sheet.getLastColumn() : 0,
+      headerOk: selected.diagnostics.header.ok,
+      firstDataRowFound: selected.diagnostics.firstDataRow.rowFound,
+      firstDataRowOk: selected.diagnostics.firstDataRow.ok,
+      mismatchedHeaderColumns: selected.diagnostics.header.mismatchedColumns,
+      invalidColumns: selected.diagnostics.firstDataRow.invalidColumns,
+      ok: Boolean(sheet && sheet.getMaxColumns() >= definition.minColumns && selected.diagnostics.firstDataRow.ok)
+    };
+  });
+  return {
+    spreadsheetId: database.getId(),
+    url: database.getUrl(),
+    coreSheets: result,
+    hasAdminWhitelist: Boolean(database.getSheetByName(ADMIN_WHITELIST_SHEET_NAME)),
+    hasAdminExecutionLogs: Boolean(database.getSheetByName(ADMIN_EXECUTION_LOG_SHEET_NAME))
+  };
+}
+
+function logAndReturnMigrationResult_(result) {
+  console.log(JSON.stringify(result, null, 2));
+  return result;
+}
+
+function getMigrationSourceSpreadsheetIdForRun_() {
+  return PropertiesService.getScriptProperties().getProperty('MIGRATION_SOURCE_SHEET_ID') || BillUtil.databaseSheetId;
+}
+
+function getMigrationTargetSpreadsheetNameForRun_() {
+  return PropertiesService.getScriptProperties().getProperty('MIGRATION_TARGET_SHEET_NAME') || `AM Database Migrated ${Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyyMMdd_HHmmss')}`;
+}
+
+function runValidateCurrentDatabase() {
+  return logAndReturnMigrationResult_(validateNamedDatabaseSheets(BillUtil.databaseSheetId));
+}
+
+function runValidateMigrationSourceDatabase() {
+  return logAndReturnMigrationResult_(validateNamedDatabaseSheets(getMigrationSourceSpreadsheetIdForRun_()));
+}
+
+function runMigrateDatabaseToNamedSheets() {
+  return logAndReturnMigrationResult_(migrateDatabaseToNamedSheets(
+    getMigrationSourceSpreadsheetIdForRun_(),
+    getMigrationTargetSpreadsheetNameForRun_()
+  ));
+}
+
+function runValidateFakePreMigrationDatabase() {
+  return logAndReturnMigrationResult_(validateNamedDatabaseSheets('1Yx4UoqVl_8VAKFE1ffz0QSnLWnmPr_DaK4AG9ngEOyc'));
+}
+
+function runMigrateFakePreMigrationDatabase() {
+  return logAndReturnMigrationResult_(migrateDatabaseToNamedSheets(
+    '1Yx4UoqVl_8VAKFE1ffz0QSnLWnmPr_DaK4AG9ngEOyc',
+    `移行後テスト ${Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyyMMdd_HHmmss')}`
+  ));
 }
 
 /**
@@ -443,17 +946,17 @@ function isUserInChannel(channelId = billChannelId, userId) {
 }
 
 /**
- * メール認証を行い、今月のプロジェクトごとの勤務時間及び合計金額(税込み)を返すAPI
+ * メール認証を行い、指定月のプロジェクトごとの勤務時間及び合計金額(税込み)を返す
  * @param {string} email - メールアドレス
  * @param {string} password - パスワード（平文）
  * @param {number} targetMonth - 対象月 (省略時は現在の月)
  * @param {number} targetYear - 対象年 (省略時は現在の年)
  * @returns {Object} - {status: string, data: {workTimeByProject: Object, totalAmount: number, month: number, year: number}}
  */
-function getMonthlyWorkTimeAndSalaryWithAuth(email, password, targetMonth = null, targetYear = null, tokenForApi = null) {
+function getMonthlyWorkTimeAndSalaryWithAuth(email, password, targetMonth = null, targetYear = null) {
   try {
     // 認証処理
-    const authResult = tokenForApi ? authenticateUserByApiToken(email, tokenForApi) : authenticateUser(email, password);
+    const authResult = authenticateUser(email, password);
     if (authResult.status !== 'success') {
       return authResult;
     }
@@ -619,85 +1122,9 @@ function authenticateUser(email, password) {
   }
 }
 
-function authenticateUserByApiToken(email, tokenForApi) {
-  if (!apiToken || tokenForApi !== apiToken) {
-    return {
-      status: 'error',
-      message: 'APIトークンが正しくありません'
-    };
-  }
-  const userSheet = getDatabaseSheet(0);
-  const lastRow = userSheet.getLastRow();
-  if (lastRow < 2) {
-    return {
-      status: 'error',
-      message: 'ユーザーデータが存在しません'
-    };
-  }
-  const values = userSheet.getRange(2, 1, lastRow - 1, 10).getValues();
-  for (let i = 0; i < values.length; i++) {
-    if (values[i][USER_COL.email - 1] === email) {
-      if (values[i][USER_COL.deletedAt - 1]) {
-        return {
-          status: 'error',
-          message: 'このユーザーは無効化されています'
-        };
-      }
-      return {
-        status: 'success',
-        userId: values[i][USER_COL.id - 1],
-        attendanceSheetId: values[i][USER_COL.attendanceSheetId - 1]
-      };
-    }
-  }
-  return {
-    status: 'error',
-    message: 'メールアドレスが見つかりません'
-  };
-}
-
-/**
- * 月次勤務実績API用GETハンドラー
- * URL: /exec?email=xxx@example.com&password=password&month=xx&year=xxxx
- */
-function handleMonthlyWorkTimeApi(e) {
-  try {
-    const params = e.parameter;
-    const email = params.email;
-    const password = params.password;
-    const tokenForApi = params.apiToken || params.token;
-    
-    if (!email || (!password && !tokenForApi)) {
-      return ContentService
-        .createTextOutput(JSON.stringify({
-          status: 'error',
-          message: 'emailとpassword、またはemailとapiTokenパラメータが必要です'
-        }))
-        .setMimeType(ContentService.MimeType.JSON);
-    }
-    
-    const month = params.month ? parseInt(params.month) : null;
-    const year = params.year ? parseInt(params.year) : null;
-    
-    const result = getMonthlyWorkTimeAndSalaryWithAuth(email, password, month, year, tokenForApi);
-    
-    return ContentService
-      .createTextOutput(JSON.stringify(result, null, 2))
-      .setMimeType(ContentService.MimeType.JSON);
-      
-  } catch (error) {
-    return ContentService
-      .createTextOutput(JSON.stringify({
-        status: 'error',
-        message: `サーバーエラー: ${error.message}`
-      }))
-      .setMimeType(ContentService.MimeType.JSON);
-  }
-}
-
 /**
  * GETリクエスト用ハンドラー
- * email/passwordが指定された場合は既存API、それ以外は勤怠入力フォームを表示する
+ * 管理画面・実績画面・勤怠入力フォームを表示する
  */
 function doGet(e) {
   const params = e && e.parameter ? e.parameter : {};
@@ -708,10 +1135,6 @@ function doGet(e) {
 
   if (params.view === 'worktime') {
     return renderMonthlyWorkTimePage(e);
-  }
-
-  if (params.email && (params.password || params.apiToken || params.token)) {
-    return handleMonthlyWorkTimeApi(e);
   }
 
   const template = HtmlService.createTemplateFromFile('index');
@@ -1216,14 +1639,13 @@ function renderMonthlyWorkTimePage(e) {
       message: '実績閲覧は今月まで指定できます'
     };
   } else {
-    result = getMonthlyWorkTimeAndSalaryWithAuth(params.email, params.password, month, year, params.apiToken || params.token);
+    result = getMonthlyWorkTimeAndSalaryWithAuth(params.email, params.password, month, year);
   }
   const template = HtmlService.createTemplateFromFile('worktime');
   template.deployURL = ScriptApp.getService().getUrl();
   template.resultJson = JSON.stringify(result);
   template.email = params.email || '';
   template.password = params.password || '';
-  template.apiToken = params.apiToken || params.token || '';
   const htmlOutput = template.evaluate();
   htmlOutput.setTitle('実績');
   htmlOutput.addMetaTag('viewport', 'width=device-width, initial-scale=1');
@@ -1349,6 +1771,8 @@ function executeAdminAction(params) {
     updateWageUpgrades(params);
   } else if (action === 'upsertUser') {
     upsertUser(params);
+  } else if (action === 'updateUserName') {
+    updateUserName(params);
   } else if (action === 'deleteUser') {
     logicalDeleteUser(params.userId);
   } else if (action === 'addRoleAllowance') {
@@ -1663,6 +2087,16 @@ function upsertUser(params) {
       ''
     ]);
   }
+}
+
+function updateUserName(params) {
+  const sheet = getDatabaseSheet(0);
+  const row = findRowById(sheet, params.userId);
+  const nextName = String(params.name || '').trim();
+  if (nextName.length > 100) {
+    throw new Error('名前は100文字以内で入力してください');
+  }
+  sheet.getRange(row, USER_COL.name).setValue(nextName);
 }
 
 function logicalDeleteUser(userId) {

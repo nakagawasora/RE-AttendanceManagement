@@ -49,10 +49,35 @@ const DATABASE_META_SHEET_NAMES_FOR_BILL = [
   ADMIN_EXECUTION_LOG_SHEET_NAME_FOR_BILL,
   ADMIN_WHITELIST_SHEET_NAME_FOR_BILL
 ];
+const BILL_DATABASE_CORE_SHEET_DEFINITIONS = [
+  {
+    name: 'Users',
+    aliases: ['Users', 'User', 'ID', 'ユーザー', 'ユーザ', 'ユーザー一覧', 'Usersシート']
+  },
+  {
+    name: 'Projects',
+    aliases: ['Projects', 'Project', 'PJ', 'PJs', 'プロジェクト', 'プロジェクト一覧', 'Projectsシート']
+  },
+  {
+    name: 'WageUpgrades',
+    aliases: ['WageUpgrades', 'WageUpgrade', 'HourlyWageIncrements', 'upgrade', '時給増分', '時給アップ', '時給アップシート']
+  },
+  {
+    name: 'RoleAllowances',
+    aliases: ['RoleAllowances', 'RoleAllowance', '役職手当', '役職手当シート']
+  }
+];
 
 function getDatabaseSheetsForBill() {
-  return SpreadsheetApp.openById(databaseSheetId).getSheets()
-    .filter(sheet => !DATABASE_META_SHEET_NAMES_FOR_BILL.includes(sheet.getName()));
+  const database = SpreadsheetApp.openById(databaseSheetId);
+  const fallbackSheets = getOrderedNonMetaDatabaseSheetsForBill(database);
+  return BILL_DATABASE_CORE_SHEET_DEFINITIONS.map((definition, index) => {
+    const sheet = findDatabaseSheetByDefinitionForBill(database, definition) || fallbackSheets[index];
+    if (!sheet) {
+      throw new Error(`${definition.name}シートが見つかりません`);
+    }
+    return sheet;
+  });
 }
 
 function getDatabaseSheetForBill(index) {
@@ -61,6 +86,20 @@ function getDatabaseSheetForBill(index) {
     throw new Error(`データベースシート${index + 1}が見つかりません`);
   }
   return sheet;
+}
+
+function getOrderedNonMetaDatabaseSheetsForBill(database) {
+  return database.getSheets()
+    .filter(sheet => !DATABASE_META_SHEET_NAMES_FOR_BILL.includes(sheet.getName()));
+}
+
+function normalizeSheetNameForLookupForBill(name) {
+  return String(name || '').trim().toLowerCase().replace(/\s+/g, '');
+}
+
+function findDatabaseSheetByDefinitionForBill(database, definition) {
+  const aliases = definition.aliases.map(normalizeSheetNameForLookupForBill);
+  return database.getSheets().find(sheet => aliases.includes(normalizeSheetNameForLookupForBill(sheet.getName()))) || null;
 }
 
 /**
@@ -712,6 +751,9 @@ function generate2MonthBill(attendanceSheetId,aggregationMonth,aggregationYear,t
 const BillUtil = {
     get databaseSheetId() {
         return databaseSheetId;
+    },
+    set databaseSheetId(nextDatabaseSheetId) {
+        databaseSheetId = nextDatabaseSheetId;
     },
 
     calculateMonthlyWorkTime,
