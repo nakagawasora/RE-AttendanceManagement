@@ -430,6 +430,19 @@ function migrateDatabaseToNamedSheets(sourceSpreadsheetId, targetSpreadsheetName
     }
   }
 
+  const driveSyncResult = shouldSkipMigratedDatabaseDriveAccessSync_()
+    ? {
+      movedToSourceParent: false,
+      copiedSharing: false,
+      copiedEditors: 0,
+      copiedViewers: 0,
+      removedExtraEditors: 0,
+      removedExtraViewers: 0,
+      warnings: ['移行先DBの場所・権限同期は MIGRATION_SYNC_DRIVE_ACCESS=false によりスキップしました']
+    }
+    : syncMigratedDatabaseDrivePlacementAndPermissions_(sourceId, target.getId());
+  warnings.push(...driveSyncResult.warnings);
+
   return {
     status: 'success',
     sourceSpreadsheetId: sourceId,
@@ -437,8 +450,129 @@ function migrateDatabaseToNamedSheets(sourceSpreadsheetId, targetSpreadsheetName
     targetUrl: target.getUrl(),
     migrated,
     warnings,
+    driveSync: {
+      movedToSourceParent: driveSyncResult.movedToSourceParent,
+      copiedSharing: driveSyncResult.copiedSharing,
+      copiedEditors: driveSyncResult.copiedEditors,
+      copiedViewers: driveSyncResult.copiedViewers,
+      removedExtraEditors: driveSyncResult.removedExtraEditors,
+      removedExtraViewers: driveSyncResult.removedExtraViewers
+    },
     nextStep: `スクリプトプロパティ DATABASE_SHEET_ID を ${target.getId()} に変更してください`
   };
+}
+
+function shouldSkipMigratedDatabaseDriveAccessSync_() {
+  return String(PropertiesService.getScriptProperties().getProperty('MIGRATION_SYNC_DRIVE_ACCESS') || '').trim().toLowerCase() === 'false';
+}
+
+function syncMigratedDatabaseDrivePlacementAndPermissions_(sourceSpreadsheetId, targetSpreadsheetId) {
+  const result = {
+    movedToSourceParent: false,
+    copiedSharing: false,
+    copiedEditors: 0,
+    copiedViewers: 0,
+    removedExtraEditors: 0,
+    removedExtraViewers: 0,
+    warnings: []
+  };
+  try {
+    const sourceFile = DriveApp.getFileById(sourceSpreadsheetId);
+    const targetFile = DriveApp.getFileById(targetSpreadsheetId);
+    const sourceParents = sourceFile.getParents();
+    if (sourceParents.hasNext()) {
+      targetFile.moveTo(sourceParents.next());
+      result.movedToSourceParent = true;
+    } else {
+      result.warnings.push('移行元DBの親フォルダを取得できなかったため、移行先DBは作成者のマイドライブ上に残っています');
+    }
+
+    try {
+      targetFile.setSharing(sourceFile.getSharingAccess(), sourceFile.getSharingPermission());
+      result.copiedSharing = true;
+    } catch (error) {
+      result.warnings.push(`リンク共有設定のコピーに失敗しました: ${error.message}`);
+    }
+
+    result.removedExtraEditors = removeExtraDriveUsers_(
+      targetFile.getEditors(),
+      buildAllowedDriveUserEmails_(sourceFile),
+      email => targetFile.removeEditor(email),
+      '編集者',
+      result.warnings
+    );
+    result.removedExtraViewers = removeExtraDriveUsers_(
+      targetFile.getViewers(),
+      buildAllowedDriveUserEmails_(sourceFile),
+      email => targetFile.removeViewer(email),
+      '閲覧者',
+      result.warnings
+    );
+    result.copiedEditors = copyDriveUsers_(sourceFile.getEditors(), email => targetFile.addEditor(email), '編集者', result.warnings);
+    result.copiedViewers = copyDriveUsers_(sourceFile.getViewers(), email => targetFile.addViewer(email), '閲覧者', result.warnings);
+  } catch (error) {
+    result.warnings.push(`移行先DBの場所・権限コピーに失敗しました: ${error.message}`);
+  }
+  return result;
+}
+
+function buildAllowedDriveUserEmails_(sourceFile) {
+  const allowed = {};
+  try {
+    const owner = sourceFile.getOwner();
+    if (owner && owner.getEmail()) {
+      allowed[owner.getEmail()] = true;
+    }
+  } catch (error) {
+    // オーナー取得に失敗しても、編集者・閲覧者ベースの削除は継続する。
+  }
+  sourceFile.getEditors().forEach(user => {
+    const email = user.getEmail();
+    if (email) {
+      allowed[email] = true;
+    }
+  });
+  sourceFile.getViewers().forEach(user => {
+    const email = user.getEmail();
+    if (email) {
+      allowed[email] = true;
+    }
+  });
+  return allowed;
+}
+
+function removeExtraDriveUsers_(users, allowedEmails, removeUser, label, warnings) {
+  let removed = 0;
+  users.forEach(user => {
+    const email = user.getEmail();
+    if (!email || allowedEmails[email]) {
+      return;
+    }
+    try {
+      removeUser(email);
+      removed++;
+    } catch (error) {
+      warnings.push(`余分な${label} ${email} の削除に失敗しました。フォルダ継承権限の可能性があります: ${error.message}`);
+    }
+  });
+  return removed;
+}
+
+function copyDriveUsers_(users, addUser, label, warnings) {
+  let copied = 0;
+  users.forEach(user => {
+    const email = user.getEmail();
+    if (!email) {
+      return;
+    }
+    try {
+      addUser(email);
+      copied++;
+    } catch (error) {
+      warnings.push(`${label} ${email} のコピーに失敗しました: ${error.message}`);
+    }
+  });
+  return copied;
 }
 
 function migrateDatabaseToNamedSheetsAndUseIt(sourceSpreadsheetId, targetSpreadsheetName) {
