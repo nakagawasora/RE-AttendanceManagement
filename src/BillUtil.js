@@ -15,6 +15,93 @@ var databaseSheetId = BILL_UTIL_PROPS.getProperty("DATABASE_SHEET_ID");
 // 消費税率
 const taxPercentage = Number(BILL_UTIL_PROPS.getProperty("TAX_PERCENTAGE") || "10");
 
+const USERS_COLUMNS = {
+  id: 1,
+  attendanceSheetId: 2,
+  slackUserId: 3,
+  driveFolderId: 4,
+  addressSheetId: 5,
+  email: 6,
+  passwordHash: 7,
+  savedData: 8,
+  name: 9,
+  deletedAt: 10
+};
+
+const PROJECT_COLUMNS = {
+  id: 1,
+  name: 2,
+  hourlyWage: 3,
+  active: 4,
+  assignedUserIds: 5
+};
+
+const ROLE_ALLOWANCE_COLUMNS = {
+  id: 1,
+  name: 2,
+  userId: 3,
+  price: 4,
+  deletedAt: 5
+};
+const ADMIN_EXECUTION_LOG_SHEET_NAME_FOR_BILL = 'AdminExecutionLogs';
+const ADMIN_WHITELIST_SHEET_NAME_FOR_BILL = 'AdminWhitelist';
+const DATABASE_META_SHEET_NAMES_FOR_BILL = [
+  ADMIN_EXECUTION_LOG_SHEET_NAME_FOR_BILL,
+  ADMIN_WHITELIST_SHEET_NAME_FOR_BILL
+];
+const BILL_DATABASE_CORE_SHEET_DEFINITIONS = [
+  {
+    name: 'Users',
+    aliases: ['Users', 'User', 'ID', 'ユーザー', 'ユーザ', 'ユーザー一覧', 'Usersシート']
+  },
+  {
+    name: 'Projects',
+    aliases: ['Projects', 'Project', 'PJ', 'PJs', 'プロジェクト', 'プロジェクト一覧', 'Projectsシート']
+  },
+  {
+    name: 'WageUpgrades',
+    aliases: ['WageUpgrades', 'WageUpgrade', 'HourlyWageIncrements', 'upgrade', '時給増分', '時給アップ', '時給アップシート']
+  },
+  {
+    name: 'RoleAllowances',
+    aliases: ['RoleAllowances', 'RoleAllowance', '役職手当', '役職手当シート']
+  }
+];
+
+function getDatabaseSheetsForBill() {
+  const database = SpreadsheetApp.openById(databaseSheetId);
+  const fallbackSheets = getOrderedNonMetaDatabaseSheetsForBill(database);
+  return BILL_DATABASE_CORE_SHEET_DEFINITIONS.map((definition, index) => {
+    const sheet = findDatabaseSheetByDefinitionForBill(database, definition) || fallbackSheets[index];
+    if (!sheet) {
+      throw new Error(`${definition.name}シートが見つかりません`);
+    }
+    return sheet;
+  });
+}
+
+function getDatabaseSheetForBill(index) {
+  const sheet = getDatabaseSheetsForBill()[index];
+  if (!sheet) {
+    throw new Error(`データベースシート${index + 1}が見つかりません`);
+  }
+  return sheet;
+}
+
+function getOrderedNonMetaDatabaseSheetsForBill(database) {
+  return database.getSheets()
+    .filter(sheet => !DATABASE_META_SHEET_NAMES_FOR_BILL.includes(sheet.getName()));
+}
+
+function normalizeSheetNameForLookupForBill(name) {
+  return String(name || '').trim().toLowerCase().replace(/\s+/g, '');
+}
+
+function findDatabaseSheetByDefinitionForBill(database, definition) {
+  const aliases = definition.aliases.map(normalizeSheetNameForLookupForBill);
+  return database.getSheets().find(sheet => aliases.includes(normalizeSheetNameForLookupForBill(sheet.getName()))) || null;
+}
+
 /**
  * 勤怠シートからクローリングして勤務時間を計算
  * @param {string} attendanceSheetId - 勤怠シートのID
@@ -83,9 +170,13 @@ function calculateMonthlyWorkTime(attendanceSheetId,aggregationMonth,aggregation
 function generateBill(attendanceSheetId,driveFolderId,aggregationMonth,aggregationYear,thatYear = new Date().getFullYear(),thatMonth = new Date().getMonth() + 1,thatDate = new Date().getDate()) {
   //シートと変数の準備
   const databaseSheet = SpreadsheetApp.openById(databaseSheetId);
-  const addressSheetId = databaseSheet.getSheets()[0].getRange(`E${search(databaseSheet.getSheets()[0],attendanceSheetId)[0]}`).getValue();
+  const user = getUserRowByAttendanceSheetId(attendanceSheetId);
+  if (user.deletedAt) {
+    return {status:'論理削除済みユーザーの請求書は発行できません',slackUserId:user.slackUserId,aggregationYear:aggregationYear,aggregationMonth:aggregationMonth,billUrl:''};
+  }
+  const addressSheetId = user.addressSheetId;
   const addressSheet = SpreadsheetApp.openById(addressSheetId);
-  let slackUserId = databaseSheet.getSheets()[0].getRange(`C${search(databaseSheet.getSheets()[0],attendanceSheetId)[0]}`).getValue();
+  let slackUserId = user.slackUserId;
   let billUrl;
   //インボイス請求書かを判断
   //インボイス番号はT（十三桁の半角数字）の形
@@ -94,16 +185,16 @@ function generateBill(attendanceSheetId,driveFolderId,aggregationMonth,aggregati
   const addressArray = addressSheet.getSheets()[0].getRange('A1:E7').getValues();
   const invoiceOrNot = addressArray[4][1];
   let status;
+  let workingBillSheetId;
   try { 
     //インボイスでない場合
     if (invoiceOrNot === 'いいえ') {
-      bill = SpreadsheetApp.openById(normalBillSheetId).getActiveSheet();
+      workingBillSheetId = createTemporaryBillSpreadsheet(normalBillSheetId, aggregationYear, aggregationMonth, addressArray[2][1] + addressArray[2][2]);
+      bill = SpreadsheetApp.openById(workingBillSheetId).getActiveSheet();
       //勤務時間計算
       const projectWorkTimes = calculateMonthlyWorkTime(attendanceSheetId,aggregationMonth,aggregationYear);
       //プロジェクト名から時給ごとにわける
       let hourlyWageDict = projectNameToHourlyWage(projectWorkTimes, attendanceSheetId);
-      //請求書シートを初期化
-      resetBill(normalBillSheetId);
       //請求書シートに計算結果を記述
       //通し番号更新
       const lastInvoiceNo = Number(addressArray[6][1] || 0);
@@ -120,6 +211,12 @@ function generateBill(attendanceSheetId,driveFolderId,aggregationMonth,aggregati
           rowPointer++;
         }
       }
+      const roleAllowanceItems = calculateRoleAllowanceItems(attendanceSheetId, aggregationMonth, aggregationYear, projectWorkTimes);
+      roleAllowanceItems.forEach(item => {
+        const setArray = [[`${item.name}(${item.price}円×${item.workTimeText})`,'','',1,'式',item.amount]];
+        bill.getRange(`A${rowPointer}:F${rowPointer}`).setValues(setArray);
+        rowPointer++;
+      });
       //請求書シートに振込先を記述
       let deadline;
       if(thatDate > 10){
@@ -133,21 +230,18 @@ function generateBill(attendanceSheetId,driveFolderId,aggregationMonth,aggregati
       const rightBlock = [['No',addressArray[6][1] + 1],['請求日',new Date(thatYear,thatMonth - 1,thatDate).toLocaleDateString('ja-JP')],['',''],[`〒${addressArray[1][1]}`,''],[addressArray[1][2],''],[addressArray[1][3],''],[addressArray[2][1] + addressArray[2][2],''],[`TEL:${addressArray[3][1]}`,'']];
       bill.getRange('F2:G9').setValues(rightBlock);
       //請求書シートをpdf出力
-      billUrl = spreadsheetToPdf(normalBillSheetId,driveFolderId,aggregationYear,aggregationMonth,addressArray[2][1] + addressArray[2][2]);
-      //請求書シートを初期化
-      resetBill(normalBillSheetId);
+      billUrl = spreadsheetToPdf(workingBillSheetId,driveFolderId,aggregationYear,aggregationMonth,addressArray[2][1] + addressArray[2][2]);
       status = 'success';
     }
     //インボイスの場合（プルダウンではい・いいえなのでいいえ以外）
     else {
-      bill = SpreadsheetApp.openById(invoiceBillSheetId).getActiveSheet();
+      workingBillSheetId = createTemporaryBillSpreadsheet(invoiceBillSheetId, aggregationYear, aggregationMonth, addressArray[2][1] + addressArray[2][2]);
+      bill = SpreadsheetApp.openById(workingBillSheetId).getActiveSheet();
       invoinceNumber = addressSheet.getSheets()[0].getRange('B6').getValue();
       //勤務時間計算
       const projectWorkTimes = calculateMonthlyWorkTime(attendanceSheetId,aggregationMonth,aggregationYear);
       //プロジェクト名から時給ごとにわける
       let hourlyWageDict = projectNameToHourlyWage(projectWorkTimes, attendanceSheetId);
-      //請求書シートを初期化
-      resetBill(invoiceBillSheetId);
       //請求書シートに計算結果を記述
       //通し番号更新
       addressSheet.getRange('B7').setValue(addressArray[6][1] + 1);
@@ -161,6 +255,12 @@ function generateBill(attendanceSheetId,driveFolderId,aggregationMonth,aggregati
           rowPointer++;
         }
       }
+      const roleAllowanceItems = calculateRoleAllowanceItems(attendanceSheetId, aggregationMonth, aggregationYear, projectWorkTimes);
+      roleAllowanceItems.forEach(item => {
+        const setArray = [[`${item.name}(${item.price}円×${item.workTimeText})`,'','',1,'式',item.amount,`${taxPercentage}%`]];
+        bill.getRange(`A${rowPointer}:G${rowPointer}`).setValues(setArray);
+        rowPointer++;
+      });
       //請求書シートに振込先を記述
       let deadline;
       if(thatDate > 10){
@@ -174,14 +274,15 @@ function generateBill(attendanceSheetId,driveFolderId,aggregationMonth,aggregati
       const rightBlock = [['','No',addressArray[6][1] + 1],['','請求日',new Date(thatYear,thatMonth - 1,thatDate).toLocaleDateString('ja-JP')],['','',''],[`〒${addressArray[1][1]}`,'',''],[addressArray[1][2],'',''],[addressArray[1][3],'',''],[addressArray[2][1]+addressArray[2][2],'',''],[`TEL:${addressArray[3][1]}`,'',''],[`登録番号:T${addressArray[5][1]}`,'','']];
       bill.getRange('F2:H10').setValues(rightBlock);
       //請求書シートをpdf出力
-      billUrl = spreadsheetToPdf(invoiceBillSheetId,driveFolderId,aggregationYear,aggregationMonth,addressArray[2][1] + addressArray[2][2]);
-      //請求書シートを初期化
-      resetBill(invoiceBillSheetId);
+      billUrl = spreadsheetToPdf(workingBillSheetId,driveFolderId,aggregationYear,aggregationMonth,addressArray[2][1] + addressArray[2][2]);
       status = 'success'
     }
   }
   catch(e){
     status = e.message;
+  }
+  finally {
+    trashSpreadsheetFile(workingBillSheetId);
   }
   //ManegementUtil接続用配列
   return {status:status,slackUserId:slackUserId,aggregationYear:aggregationYear,aggregationMonth:aggregationMonth,billUrl:billUrl}
@@ -218,6 +319,111 @@ function msecDictToHourAndMinutesDict(workTimeDict) {
   return workHourAndMinutesDict;
 }
 
+function msecToHourAndMinutes(msec) {
+  return `${Math.trunc(msec/3600000)}時間${Math.trunc((msec%3600000)/60000)}分`;
+}
+
+function calculateTotalWorkTime(projectWorkTimes) {
+  let total = 0;
+  for (let key in projectWorkTimes) {
+    total += Number(projectWorkTimes[key] || 0);
+  }
+  return total;
+}
+
+function getUserIdByAttendanceSheetId(attendanceSheetId) {
+  const user = getUserRowByAttendanceSheetId(attendanceSheetId);
+  if (user.deletedAt) {
+    throw new Error('論理削除済みユーザーは対象外です');
+  }
+  return user.id;
+}
+
+function getUserRowByAttendanceSheetId(attendanceSheetId) {
+  const userSheet = getDatabaseSheetForBill(0);
+  const [userRow] = search(userSheet, attendanceSheetId);
+  if (userRow === -1) {
+    throw new Error(`出席シートID「${attendanceSheetId}」に対応するユーザーが見つかりません`);
+  }
+  const row = userSheet.getRange(userRow, 1, 1, 10).getValues()[0];
+  return {
+    id: row[USERS_COLUMNS.id - 1],
+    attendanceSheetId: row[USERS_COLUMNS.attendanceSheetId - 1],
+    slackUserId: row[USERS_COLUMNS.slackUserId - 1],
+    driveFolderId: row[USERS_COLUMNS.driveFolderId - 1],
+    addressSheetId: row[USERS_COLUMNS.addressSheetId - 1],
+    email: row[USERS_COLUMNS.email - 1],
+    name: row[USERS_COLUMNS.name - 1],
+    deletedAt: row[USERS_COLUMNS.deletedAt - 1]
+  };
+}
+
+function getRoleAllowancesForUser(userId) {
+  const sheets = getDatabaseSheetsForBill();
+  const roleAllowanceSheet = sheets[3];
+  if (!roleAllowanceSheet || roleAllowanceSheet.getLastRow() < 2) {
+    return [];
+  }
+  const values = roleAllowanceSheet.getRange(2, 1, roleAllowanceSheet.getLastRow() - 1, 5).getValues();
+  return values
+    .filter(row => String(row[ROLE_ALLOWANCE_COLUMNS.userId - 1]) === String(userId))
+    .filter(row => !row[ROLE_ALLOWANCE_COLUMNS.deletedAt - 1])
+    .map(row => ({
+      id: row[ROLE_ALLOWANCE_COLUMNS.id - 1],
+      name: row[ROLE_ALLOWANCE_COLUMNS.name - 1],
+      userId: row[ROLE_ALLOWANCE_COLUMNS.userId - 1],
+      price: Number(row[ROLE_ALLOWANCE_COLUMNS.price - 1] || 0)
+    }))
+    .filter(allowance => allowance.name && allowance.price !== 0);
+}
+
+function calculateRoleAllowanceItems(attendanceSheetId, aggregationMonth, aggregationYear, precomputedProjectWorkTimes) {
+  const userId = getUserIdByAttendanceSheetId(attendanceSheetId);
+  const projectWorkTimes = precomputedProjectWorkTimes || calculateMonthlyWorkTime(attendanceSheetId, aggregationMonth, aggregationYear);
+  const totalWorkTime = calculateTotalWorkTime(projectWorkTimes);
+  const totalWorkTimeText = msecToHourAndMinutes(totalWorkTime);
+  return getRoleAllowancesForUser(userId).map(allowance => ({
+    id: allowance.id,
+    name: allowance.name,
+    userId: allowance.userId,
+    price: allowance.price,
+    workTimeMsec: totalWorkTime,
+    workTimeText: totalWorkTimeText,
+    amount: Math.round(allowance.price * totalWorkTime / 3600000)
+  })).filter(item => item.workTimeMsec > 0);
+}
+
+function calculateMonthlyWorkItems(attendanceSheetId, aggregationMonth, aggregationYear, precomputedProjectWorkTimes) {
+  const database = SpreadsheetApp.openById(databaseSheetId);
+  const projectSheet = getDatabaseSheetForBill(1);
+  const upgradeSheet = getDatabaseSheetForBill(2);
+  const userId = getUserIdByAttendanceSheetId(attendanceSheetId);
+  const projectWorkTimes = precomputedProjectWorkTimes || calculateMonthlyWorkTime(attendanceSheetId, aggregationMonth, aggregationYear);
+  const projectList = projectSheet.getLastRow() < 2 ? [] : projectSheet.getRange(2, 1, projectSheet.getLastRow() - 1, 5).getValues();
+  const upgradeList = upgradeSheet.getLastRow() < 2 ? [] : upgradeSheet.getRange('A2:D' + upgradeSheet.getLastRow()).getValues();
+  const upgradeMap = {};
+  for (let i = 0; i < upgradeList.length; i++) {
+    const [id, user_id, project_id, increment] = upgradeList[i];
+    upgradeMap[`${user_id}_${project_id}`] = Number(increment || 0);
+  }
+
+  return projectList.map(project => {
+    const projectId = project[PROJECT_COLUMNS.id - 1];
+    const projectName = project[PROJECT_COLUMNS.name - 1];
+    const workTimeMsec = Number(projectWorkTimes[projectName] || 0);
+    const unitPrice = Number(project[PROJECT_COLUMNS.hourlyWage - 1] || 0) + Number(upgradeMap[`${userId}_${projectId}`] || 0);
+    return {
+      type: 'project',
+      id: projectId,
+      name: projectName,
+      unitPrice: unitPrice,
+      workTimeMsec: workTimeMsec,
+      workTimeText: msecToHourAndMinutes(workTimeMsec),
+      amount: Math.round(unitPrice * workTimeMsec / 3600000)
+    };
+  }).filter(item => item.workTimeMsec > 0);
+}
+
 /**
  * 与えられた連想配列{プロジェクト名:時間}をデータベースを参照して{時給:時間}の連想配列に
  * @param {Object.<string, (string|number)>} workTimeDict - 連想配列{プロジェクト名:時間}
@@ -227,27 +433,17 @@ function msecDictToHourAndMinutesDict(workTimeDict) {
 function projectNameToHourlyWage(workTimeDict, attendanceSheetId) {
     // Databaseブック各シートを読み込む
     const database = SpreadsheetApp.openById(databaseSheetId);
-    const userSheet = database.getSheets()[0];     // Usersシート
-    const projectSheet = database.getSheets()[1];  // Projectsシート
-    const upgradeSheet = database.getSheets()[2];  // 時給アップシート
+    const userSheet = getDatabaseSheetForBill(0);     // Usersシート
+    const projectSheet = getDatabaseSheetForBill(1);  // Projectsシート
+    const upgradeSheet = getDatabaseSheetForBill(2);  // 時給アップシート
     
-    // UsersシートからattendanceSheetIdを検索してユーザーIDを取得
-    const [userRow, userCol] = search(userSheet, attendanceSheetId);
-    
-    let userId = null;
-    if (userRow !== -1) {
-        // attendanceSheetIdが見つかった行のA列（ID列）を取得
-        userId = userSheet.getRange(userRow, 1).getValue();
-    } else {
-        // ユーザーが見つからない場合はエラーを投げる
-        throw new Error(`出席シートID「${attendanceSheetId}」に対応するユーザーが見つかりません`);
-    }
+    const userId = getUserIdByAttendanceSheetId(attendanceSheetId);
     
     // プロジェクト情報を取得（A列:id, B列:プロジェクト名, C列:時給）
-    const projectList = projectSheet.getRange('A2:C' + projectSheet.getLastRow()).getValues();
+    const projectList = projectSheet.getLastRow() < 2 ? [] : projectSheet.getRange(2, 1, projectSheet.getLastRow() - 1, 5).getValues();
     
     // 時給アップ情報を取得
-    const upgradeList = upgradeSheet.getRange('A2:D' + upgradeSheet.getLastRow()).getValues();
+    const upgradeList = upgradeSheet.getLastRow() < 2 ? [] : upgradeSheet.getRange('A2:D' + upgradeSheet.getLastRow()).getValues();
     
     // 時給アップマップを作成（user_id + project_id の組み合わせをキーとする）
     const upgradeMap = {};
@@ -262,9 +458,9 @@ function projectNameToHourlyWage(workTimeDict, attendanceSheetId) {
     
     // 連想配列に時給ごとに時間を格納していく
     for (let i = 0; i < projectList.length; i++) {
-        const projectId = projectList[i][0];      // A列のid
-        const projectName = projectList[i][1];    // B列のプロジェクト名
-        let projectHourlyWage = projectList[i][2]; // C列の時給
+        const projectId = projectList[i][PROJECT_COLUMNS.id - 1];
+        const projectName = projectList[i][PROJECT_COLUMNS.name - 1];
+        let projectHourlyWage = Number(projectList[i][PROJECT_COLUMNS.hourlyWage - 1] || 0);
         
         // 時給アップ処理：ユーザーIDとプロジェクトIDの組み合わせで増分を確認
         const upgradeKey = `${userId}_${projectId}`;
@@ -304,6 +500,22 @@ function resetBill(billSheetId){
     const copied = copyResource.copyTo(bill);
     copied.getRange('A1:H40').copyTo(bill.getSheetByName('請求書').getRange('A1:H40'));
     bill.deleteSheet(copied);
+  }
+}
+
+function createTemporaryBillSpreadsheet(templateSheetId, year, month, name) {
+  const fileName = `tmp_${year}年${month}月_請求書_${name}_${Utilities.getUuid()}`;
+  return DriveApp.getFileById(templateSheetId).makeCopy(fileName).getId();
+}
+
+function trashSpreadsheetFile(spreadsheetId) {
+  if (!spreadsheetId) {
+    return;
+  }
+  try {
+    DriveApp.getFileById(spreadsheetId).setTrashed(true);
+  } catch (e) {
+    console.log(`一時請求書ファイルの削除に失敗しました: ${e.message}`);
   }
 }
 
@@ -383,11 +595,14 @@ function testABill(){
 
 function generate2MonthBill(attendanceSheetId,aggregationMonth,aggregationYear,thatYear = new Date().getFullYear(),thatMonth = new Date().getMonth() + 1,thatDate = new Date().getDate()) {
   //シートと変数の準備
-  const databaseSheet = SpreadsheetApp.openById(databaseSheetId);
-  const addressSheetId = databaseSheet.getSheets()[0].getRange(`E${search(databaseSheet.getSheets()[0],attendanceSheetId)[0]}`).getValue();
+  const user = getUserRowByAttendanceSheetId(attendanceSheetId);
+  if (user.deletedAt) {
+    return {status:'論理削除済みユーザーの請求書は発行できません',slackUserId:user.slackUserId,aggregationYear:aggregationYear,aggregationMonth:aggregationMonth,billUrl:''};
+  }
+  const addressSheetId = user.addressSheetId;
   const addressSheet = SpreadsheetApp.openById(addressSheetId);
-  let slackUserId = databaseSheet.getSheets()[0].getRange(`C${search(databaseSheet.getSheets()[0],attendanceSheetId)[0]}`).getValue();
-  let driveFolderId = databaseSheet.getSheets()[0].getRange(`D${search(databaseSheet.getSheets()[0],attendanceSheetId)[0]}`).getValue();
+  let slackUserId = user.slackUserId;
+  let driveFolderId = user.driveFolderId;
   let billUrl;
   let lastmonthlastday = new Date(aggregationYear,aggregationMonth-1,0);
   //インボイス請求書かを判断
@@ -397,18 +612,18 @@ function generate2MonthBill(attendanceSheetId,aggregationMonth,aggregationYear,t
   const addressArray = addressSheet.getSheets()[0].getRange('A1:E7').getValues();
   const invoiceOrNot = addressArray[4][1];
   let status;
+  let workingBillSheetId;
   try { 
     //インボイスでない場合
     if (invoiceOrNot === 'いいえ') {
-      bill = SpreadsheetApp.openById(normalBillSheetId).getActiveSheet();
+      workingBillSheetId = createTemporaryBillSpreadsheet(normalBillSheetId, aggregationYear, aggregationMonth, addressArray[2][1] + addressArray[2][2]);
+      bill = SpreadsheetApp.openById(workingBillSheetId).getActiveSheet();
       //勤務時間計算
       const projectWorkTimes = calculateMonthlyWorkTime(attendanceSheetId,aggregationMonth,aggregationYear);
       const projectWorkTimesPrevious = calculateMonthlyWorkTime(attendanceSheetId,lastmonthlastday.getMonth()+1,lastmonthlastday.getFullYear())
       //プロジェクト名から時給ごとにわける
       let hourlyWageDict = projectNameToHourlyWage(projectWorkTimes, attendanceSheetId);
       let hourlyWageDictPrevious = projectNameToHourlyWage(projectWorkTimesPrevious, attendanceSheetId);
-      //請求書シートを初期化
-      resetBill(normalBillSheetId);
       //請求書シートに計算結果を記述
       //通し番号更新
       addressSheet.getRange('B7').setValue(addressArray[6][1] + 1);
@@ -424,6 +639,12 @@ function generate2MonthBill(attendanceSheetId,aggregationMonth,aggregationYear,t
           rowPointer++;
         }
       }
+      const roleAllowanceItemsPrevious = calculateRoleAllowanceItems(attendanceSheetId, lastmonthlastday.getMonth()+1, lastmonthlastday.getFullYear(), projectWorkTimesPrevious);
+      roleAllowanceItemsPrevious.forEach(item => {
+        const setArray = [[`${lastmonthlastday.getFullYear()}年${lastmonthlastday.getMonth()+1}月 ${item.name}(${item.price}円×${item.workTimeText})`,'','',1,'式',item.amount]];
+        bill.getRange(`A${rowPointer}:F${rowPointer}`).setValues(setArray);
+        rowPointer++;
+      });
       for (let key in hourlyWageDict) {
         if (hourlyWageDict[key] !== 0) {
           const price = Math.round(Number(key)*hourlyWageDict[key]/3600000);
@@ -432,6 +653,12 @@ function generate2MonthBill(attendanceSheetId,aggregationMonth,aggregationYear,t
           rowPointer++;
         }
       }
+      const roleAllowanceItems = calculateRoleAllowanceItems(attendanceSheetId, aggregationMonth, aggregationYear, projectWorkTimes);
+      roleAllowanceItems.forEach(item => {
+        const setArray = [[`${aggregationYear}年${aggregationMonth}月 ${item.name}(${item.price}円×${item.workTimeText})`,'','',1,'式',item.amount]];
+        bill.getRange(`A${rowPointer}:F${rowPointer}`).setValues(setArray);
+        rowPointer++;
+      });
       //請求書シートに振込先を記述
       let deadline;
       if(thatDate > 10){
@@ -445,14 +672,13 @@ function generate2MonthBill(attendanceSheetId,aggregationMonth,aggregationYear,t
       const rightBlock = [['No',addressArray[6][1] + 1],['請求日',new Date(thatYear,thatMonth - 1,thatDate).toLocaleDateString('ja-JP')],['',''],[`〒${addressArray[1][1]}`,''],[addressArray[1][2],''],[addressArray[1][3],''],[addressArray[2][1] + addressArray[2][2],''],[`TEL:${addressArray[3][1]}`,'']];
       bill.getRange('F2:G9').setValues(rightBlock);
       //請求書シートをpdf出力
-      billUrl = spreadsheetToPdf(normalBillSheetId,driveFolderId,aggregationYear,aggregationMonth,addressArray[2][1] + addressArray[2][2]);
-      //請求書シートを初期化
-      resetBill(normalBillSheetId);
+      billUrl = spreadsheetToPdf(workingBillSheetId,driveFolderId,aggregationYear,aggregationMonth,addressArray[2][1] + addressArray[2][2]);
       status = 'success';
     }
     //インボイスの場合（プルダウンではい・いいえなのでいいえ以外）
     else {
-      bill = SpreadsheetApp.openById(invoiceBillSheetId).getActiveSheet();
+      workingBillSheetId = createTemporaryBillSpreadsheet(invoiceBillSheetId, aggregationYear, aggregationMonth, addressArray[2][1] + addressArray[2][2]);
+      bill = SpreadsheetApp.openById(workingBillSheetId).getActiveSheet();
       invoinceNumber = addressSheet.getSheets()[0].getRange('B6').getValue();
       //勤務時間計算
       const projectWorkTimes = calculateMonthlyWorkTime(attendanceSheetId,aggregationMonth,aggregationYear);
@@ -460,8 +686,6 @@ function generate2MonthBill(attendanceSheetId,aggregationMonth,aggregationYear,t
       //プロジェクト名から時給ごとにわける
       let hourlyWageDict = projectNameToHourlyWage(projectWorkTimes, attendanceSheetId);
       let hourlyWageDictPrevious = projectNameToHourlyWage(projectWorkTimesPrevious, attendanceSheetId);
-      //請求書シートを初期化
-      resetBill(invoiceBillSheetId);
       //請求書シートに計算結果を記述
       //通し番号更新
       addressSheet.getRange('B7').setValue(addressArray[6][1] + 1);
@@ -476,6 +700,12 @@ function generate2MonthBill(attendanceSheetId,aggregationMonth,aggregationYear,t
           rowPointer++;
         }
       }
+      const roleAllowanceItemsPrevious = calculateRoleAllowanceItems(attendanceSheetId, lastmonthlastday.getMonth()+1, lastmonthlastday.getFullYear(), projectWorkTimesPrevious);
+      roleAllowanceItemsPrevious.forEach(item => {
+        const setArray = [[`${lastmonthlastday.getFullYear()}年${lastmonthlastday.getMonth()+1}月 ${item.name}(${item.price}円×${item.workTimeText})`,'','',1,'式',item.amount,`${taxPercentage}%`]];
+        bill.getRange(`A${rowPointer}:G${rowPointer}`).setValues(setArray);
+        rowPointer++;
+      });
       for (let key in hourlyWageDict) {
         if (hourlyWageDict[key] !== 0) {
           const price = Math.round(Number(key)*hourlyWageDict[key]/3600000);
@@ -484,6 +714,12 @@ function generate2MonthBill(attendanceSheetId,aggregationMonth,aggregationYear,t
           rowPointer++;
         }
       }
+      const roleAllowanceItems = calculateRoleAllowanceItems(attendanceSheetId, aggregationMonth, aggregationYear, projectWorkTimes);
+      roleAllowanceItems.forEach(item => {
+        const setArray = [[`${aggregationYear}年${aggregationMonth}月 ${item.name}(${item.price}円×${item.workTimeText})`,'','',1,'式',item.amount,`${taxPercentage}%`]];
+        bill.getRange(`A${rowPointer}:G${rowPointer}`).setValues(setArray);
+        rowPointer++;
+      });
       //請求書シートに振込先を記述
       let deadline;
       if(thatDate > 10){
@@ -497,15 +733,16 @@ function generate2MonthBill(attendanceSheetId,aggregationMonth,aggregationYear,t
       const rightBlock = [['','No',addressArray[6][1] + 1],['','請求日',new Date(thatYear,thatMonth - 1,thatDate).toLocaleDateString('ja-JP')],['','',''],[`〒${addressArray[1][1]}`,'',''],[addressArray[1][2],'',''],[addressArray[1][3],'',''],[addressArray[2][1]+addressArray[2][2],'',''],[`TEL:${addressArray[3][1]}`,'',''],[`登録番号:T${addressArray[5][1]}`,'','']];
       bill.getRange('F2:H10').setValues(rightBlock);
       //請求書シートをpdf出力
-      billUrl = spreadsheetToPdf(invoiceBillSheetId,driveFolderId,aggregationYear,aggregationMonth,addressArray[2][1] + addressArray[2][2]);
-      //請求書シートを初期化
-      resetBill(invoiceBillSheetId);
+      billUrl = spreadsheetToPdf(workingBillSheetId,driveFolderId,aggregationYear,aggregationMonth,addressArray[2][1] + addressArray[2][2]);
       status = 'success'
     }
   }
   catch(e){
     console.log(e)
     status = e.message;
+  }
+  finally {
+    trashSpreadsheetFile(workingBillSheetId);
   }
   //ManegementUtil接続用配列
   return {status:status,slackUserId:slackUserId,aggregationYear:aggregationYear,aggregationMonth:aggregationMonth,billUrl:billUrl}
@@ -515,12 +752,21 @@ const BillUtil = {
     get databaseSheetId() {
         return databaseSheetId;
     },
+    set databaseSheetId(nextDatabaseSheetId) {
+        databaseSheetId = nextDatabaseSheetId;
+    },
 
     calculateMonthlyWorkTime,
     generateBill,
     generate2MonthBill,
     search,
     msecDictToHourAndMinutesDict,
+    msecToHourAndMinutes,
+    calculateTotalWorkTime,
+    calculateMonthlyWorkItems,
+    calculateRoleAllowanceItems,
+    getRoleAllowancesForUser,
+    getUserIdByAttendanceSheetId,
     projectNameToHourlyWage,
     resetBill,
     spreadsheetToPdf
