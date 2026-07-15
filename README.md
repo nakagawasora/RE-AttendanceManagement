@@ -47,6 +47,7 @@ AM/
     ├── appsscript.json
     ├── BillUtil.js
     ├── ManagementUtil.js
+    ├── exec.js
     ├── index.html
     ├── worktime.html
     ├── admin.html
