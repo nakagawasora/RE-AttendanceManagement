@@ -44,6 +44,7 @@ AM/
 ├── package.json
 ├── README.md
 └── src/
+    ├── AttendanceUtil.js
     ├── appsscript.json
     ├── BillUtil.js
     ├── ManagementUtil.js
@@ -53,6 +54,8 @@ AM/
     ├── admin.html
     └── submitted.html
 ```
+
+ローカルの勤怠・実績計算テストは `npm test` で実行できます。
 
 ## デプロイ設定
 

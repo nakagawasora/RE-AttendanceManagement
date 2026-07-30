@@ -1,5 +1,6 @@
 {
     "scripts": {
+        "test": "TZ=Asia/Tokyo node --test tests/*.test.js",
         "push:dev": "clasp --project .clasp.dev.json push",
         "push:prod": "clasp --project .clasp.prod.json push",
 

@@ -102,16 +102,32 @@ function openDatabaseSpreadsheet() {
   return SpreadsheetApp.openById(BillUtil.databaseSheetId);
 }
 
+let databaseSheetsForCurrentExecution = null;
+
 function getDatabaseSheets() {
+  if (databaseSheetsForCurrentExecution) {
+    return databaseSheetsForCurrentExecution;
+  }
+
   const database = openDatabaseSpreadsheet();
-  const selectedSheets = selectDatabaseCoreSheets(database);
-  return DATABASE_CORE_SHEET_DEFINITIONS.map((definition, index) => {
+  const availableSheets = database.getSheets();
+  const namedSheets = DATABASE_CORE_SHEET_DEFINITIONS.map(definition => {
+    const aliases = definition.aliases.map(normalizeSheetNameForLookup);
+    return availableSheets.find(sheet =>
+      aliases.includes(normalizeSheetNameForLookup(sheet.getName()))
+    ) || null;
+  });
+  const selectedSheets = namedSheets.every(Boolean)
+    ? namedSheets.map(sheet => ({ sheet: sheet }))
+    : selectDatabaseCoreSheets(database);
+  databaseSheetsForCurrentExecution = DATABASE_CORE_SHEET_DEFINITIONS.map((definition, index) => {
     const sheet = selectedSheets[index].sheet;
     if (!sheet) {
       throw new Error(`${definition.name}シートが見つかりません`);
     }
     return sheet;
   });
+  return databaseSheetsForCurrentExecution;
 }
 
 function getDatabaseSheet(index) {
@@ -1050,7 +1066,6 @@ function isUserInChannel(channelId = billChannelId, userId) {
  */
 function getMonthlyWorkTimeAndSalaryWithAuth(email, password, targetMonth = null, targetYear = null) {
   try {
-    // 認証処理
     const authResult = authenticateUser(email, password);
     if (authResult.status !== 'success') {
       return authResult;
@@ -1069,64 +1084,21 @@ function getMonthlyWorkTimeAndSalaryWithAuth(email, password, targetMonth = null
         message: '実績閲覧は今月まで指定できます'
       };
     }
-    
-    // 勤務時間計算（プロジェクト名 : 勤務時間(msec)）
-    const projectWorkTimes = BillUtil.calculateMonthlyWorkTime(attendanceSheetId, month, year);
-    
-    // プロジェクト名から時給ごとに分ける（時給 : 勤務時間(msec)）
-    const hourlyWageDict = BillUtil.projectNameToHourlyWage(projectWorkTimes, attendanceSheetId);
-    
-    // 0時間のプロジェクトを除外して、見やすい形式に変換
-    const workTimeByProject = {};
-    const workTimeFormatted = BillUtil.msecDictToHourAndMinutesDict(projectWorkTimes);
-    
-    for (let projectName in projectWorkTimes) {
-      if (projectWorkTimes[projectName] > 0) {
-        workTimeByProject[projectName] = workTimeFormatted[projectName];
-      }
-    }
-    
-    // 合計金額計算（税込み）
-    let totalAmount = 0;
-    const taxRate = 1 + (Number(PropertiesService.getScriptProperties().getProperty("TAX_PERCENTAGE") || "10") / 100);
-    const projectItems = BillUtil.calculateMonthlyWorkItems(attendanceSheetId, month, year, projectWorkTimes);
-    const roleAllowances = BillUtil.calculateRoleAllowanceItems(attendanceSheetId, month, year, projectWorkTimes);
-    const lineItems = projectItems.concat(roleAllowances.map(item => ({
-      type: 'allowance',
-      id: item.id,
-      name: item.name,
-      unitPrice: item.price,
-      workTimeMsec: item.workTimeMsec,
-      workTimeText: item.workTimeText,
-      amount: item.amount
-    }))).map(item => {
-      const amountWithTax = Math.round(item.amount * taxRate);
-      totalAmount += amountWithTax;
-      return {
-        type: item.type,
-        id: item.id,
-        name: item.name,
-        unitPrice: item.unitPrice,
-        workTime: item.workTimeText,
-        amount: item.amount,
-        amountWithTax: amountWithTax
-      };
-    });
-    
+
+    const summary = buildMonthlyWorkTimeSummary(
+      authResult.userId,
+      attendanceSheetId,
+      month,
+      year
+    );
     return {
       status: 'success',
       data: {
         userId: userId,
-        workTimeByProject: workTimeByProject,
-        lineItems: lineItems,
-        roleAllowances: roleAllowances.map(item => ({
-          name: item.name,
-          price: item.price,
-          workTime: item.workTimeText,
-          amount: item.amount,
-          amountWithTax: Math.round(item.amount * taxRate)
-        })),
-        totalAmount: totalAmount,
+        workTimeByProject: summary.workTimeByProject,
+        lineItems: summary.lineItems,
+        roleAllowances: summary.roleAllowances,
+        totalAmount: summary.totalAmount,
         month: month,
         year: year,
         summary: `${year}年${month}月の勤務実績`
@@ -1141,6 +1113,34 @@ function getMonthlyWorkTimeAndSalaryWithAuth(email, password, targetMonth = null
   }
 }
 
+function buildMonthlyWorkTimeSummary(userId, attendanceSheetId, month, year) {
+  const sheets = getDatabaseSheets();
+  const attendanceSheet = SpreadsheetApp.openById(attendanceSheetId).getSheets()[0];
+  const attendanceRows = attendanceSheet.getLastRow() < 2
+    ? []
+    : attendanceSheet.getRange(2, 2, attendanceSheet.getLastRow() - 1, 4).getValues();
+  const projectRows = sheets[1].getLastRow() < 2
+    ? []
+    : sheets[1].getRange(2, 1, sheets[1].getLastRow() - 1, 5).getValues();
+  const upgradeRows = sheets[2].getLastRow() < 2
+    ? []
+    : sheets[2].getRange(2, 1, sheets[2].getLastRow() - 1, 4).getValues();
+  const allowanceRows = !sheets[3] || sheets[3].getLastRow() < 2
+    ? []
+    : sheets[3].getRange(2, 1, sheets[3].getLastRow() - 1, 5).getValues();
+
+  return AttendanceUtil.buildMonthlyWorkTimeSummaryFromRows(
+    userId,
+    attendanceRows,
+    projectRows,
+    upgradeRows,
+    allowanceRows,
+    month,
+    year,
+    PropertiesService.getScriptProperties().getProperty('TAX_PERCENTAGE') || '10'
+  );
+}
+
 /**
  * メールアドレスとパスワードでユーザー認証を行う
  * @param {string} email - メールアドレス
@@ -1149,66 +1149,38 @@ function getMonthlyWorkTimeAndSalaryWithAuth(email, password, targetMonth = null
  */
 function authenticateUser(email, password) {
   try {
-    // データベースシートを取得
-    const databaseSheet = SpreadsheetApp.openById(BillUtil.databaseSheetId);
     const userSheet = getDatabaseSheet(0);
-    
-    // 全データを取得（F列：メール、G列：パスワードハッシュ、B列：attendanceSheetId）
-    const lastRow = userSheet.getLastRow();
-    if (lastRow < 2) {
+    const user = findAttendanceUserByEmail(userSheet, email);
+    if (!user) {
       return {
         status: 'error',
-        message: 'ユーザーデータが存在しません'
+        message: 'メールアドレスまたはパスワードが正しくありません'
       };
     }
-    
-    const userData = userSheet.getRange(2, 1, lastRow - 1, 10).getValues();
-    
-    // パスワードのSHA256ハッシュ値を計算
-    const passwordHash = Utilities.computeDigest(
-      Utilities.DigestAlgorithm.SHA_256,
-      password,
-      Utilities.Charset.UTF_8
-    );
-    const passwordHashHex = passwordHash.map(byte => {
-      return (byte < 0 ? byte + 256 : byte).toString(16).padStart(2, '0');
-    }).join('');
-    
-    // メールアドレスとパスワードハッシュで照合
-    for (let i = 0; i < userData.length; i++) {
-      const userEmail = userData[i][USER_COL.email - 1];
-      const storedPasswordHash = userData[i][USER_COL.passwordHash - 1];
-      const deletedAt = userData[i][USER_COL.deletedAt - 1];
-      
-      if (userEmail === email && storedPasswordHash === passwordHashHex) {
-        if (deletedAt) {
-          return {
-            status: 'error',
-            message: 'このユーザーは無効化されています'
-          };
-        }
-        const attendanceSheetId = userData[i][USER_COL.attendanceSheetId - 1];
-        
-        if (!attendanceSheetId) {
-          return {
-            status: 'error',
-            message: '勤怠シートIDが設定されていません'
-          };
-        }
-        
-        return {
-          status: 'success',
-          userId: userData[i][USER_COL.id - 1],
-          attendanceSheetId: attendanceSheetId
-        };
-      }
+    if (user.values[USER_COL.deletedAt - 1]) {
+      return {
+        status: 'error',
+        message: 'このユーザーは無効化されています'
+      };
     }
-    
+    if (user.values[USER_COL.passwordHash - 1] !== hashWithSHA256(password || '')) {
+      return {
+        status: 'error',
+        message: 'メールアドレスまたはパスワードが正しくありません'
+      };
+    }
+    const attendanceSheetId = user.values[USER_COL.attendanceSheetId - 1];
+    if (!attendanceSheetId) {
+      return {
+        status: 'error',
+        message: '勤怠シートIDが設定されていません'
+      };
+    }
     return {
-      status: 'error',
-      message: 'メールアドレスまたはパスワードが正しくありません'
+      status: 'success',
+      userId: user.values[USER_COL.id - 1],
+      attendanceSheetId: attendanceSheetId
     };
-    
   } catch (error) {
     return {
       status: 'error',
@@ -1242,169 +1214,188 @@ function doGet(e) {
   return htmlOutput;
 }
 
-// POSTメソッド
-function doPost(e) {
-  let databaseSheet = SpreadsheetApp.openById(BillUtil.databaseSheetId);
-
-  if (e.parameter.mode === 'admin') {
-    return handleAdminPost(e);
-  }
-
-  // 勤怠提出
-  if (e.parameter.submit) {
-    // バリデーション
-    let alertContent = '';
-
-    // 入力メールアドレスがデータベース内に存在するか
-    let passOfEmail = BillUtil.search(getDatabaseSheet(0), e.parameter.email);
-
-    // 存在する場合
-    if (passOfEmail[0] > 0) {
-      if (isUserDeletedRow(getDatabaseSheet(0), passOfEmail[0])) {
-        alertContent += alert('・このユーザーは無効化されています');
-      }
-      // 入力されたパスワードのハッシュ化した値がメアドの隣のハッシュパスに一致するか
-      else if (!(getDatabaseSheet(0).getRange('F2:G' + getDatabaseSheet(0).getLastRow()).getValues()[passOfEmail[0] - 2][1] === hashWithSHA256(e.parameter.password))) {
-        alertContent += alert('・アカウント情報が不正です');
-      } else {
-        // パスワード認証成功時のバリデーション
-        alertContent += validateFormData(e);
-        alertContent += validateProjectAccess(e.parameter.email, e.parameter.password, e.parameter.project);
-
-        // 二重勤怠チェック（認証成功時のみ）
-        if (alertContent === '' && e.parameter.startTime && e.parameter.endTime) {
-          alertContent += checkDuplicateAttendance(e, passOfEmail[0]);
-        }
-      }
-    } else {
-      alertContent += alert('・アカウント情報が不正です');
-    }
-
-    // 基本的なフォームバリデーション（認証失敗時でも実行）
-    if (!passOfEmail[0] || passOfEmail[0] <= 0 || isUserDeletedRow(getDatabaseSheet(0), passOfEmail[0]) || !(getDatabaseSheet(0).getRange('F2:G' + getDatabaseSheet(0).getLastRow()).getValues()[passOfEmail[0] - 2][1] === hashWithSHA256(e.parameter.password))) {
-      alertContent += validateFormData(e);
-    }
-
-    // 警告内容がなければ書き込んで完了ページへ、あれば警告とともに再表示
-    if (alertContent === '') {
-      const attendance = [[formatTimeToGoogleForm(new Date()), e.parameter.project, e.parameter.content, formatTimeToGoogleForm(e.parameter.startTime), formatTimeToGoogleForm(e.parameter.endTime)]];
-      const sheet = SpreadsheetApp.openById(getDatabaseSheet(0).getRange('B' + passOfEmail[0]).getValue()).getSheets()[0];
-      sheet.getRange(`A${sheet.getLastRow() + 1}:E${sheet.getLastRow() + 1}`).setValues(attendance);
-
-      const template = HtmlService.createTemplateFromFile('submitted');
-      template.deployURL = ScriptApp.getService().getUrl();
-      const htmlOutput = template.evaluate();
-      htmlOutput.setTitle('提出完了');
-      htmlOutput.addMetaTag('viewport', 'width=device-width, initial-scale=1');
-      return htmlOutput;
-    } else {
-      const template = HtmlService.createTemplateFromFile('index');
-      template.deployURL = ScriptApp.getService().getUrl();
-      template.formHTML = createHtml(e, alertContent);
-      template.projectAccessJson = JSON.stringify(getProjectAccessForForm());
-      const htmlOutput = template.evaluate();
-      htmlOutput.setTitle('勤怠入力');
-      htmlOutput.addMetaTag('viewport', 'width=device-width, initial-scale=1');
-      return htmlOutput;
-    }
-  }
-
-  // 勤怠一時保存
-  if (e.parameter.save) {
-    let databaseSheet = SpreadsheetApp.openById(BillUtil.databaseSheetId);
-    let alertContent = '';
-    let passOfEmail = BillUtil.search(getDatabaseSheet(0), e.parameter.email);
-
-    // アカウント認証チェック
-    let authenticationPassed = false;
-    if (passOfEmail[0] > 0) {
-      if (isUserDeletedRow(getDatabaseSheet(0), passOfEmail[0])) {
-        alertContent += alert('・このユーザーは無効化されています');
-      } else if (getDatabaseSheet(0).getRange('F2:G' + getDatabaseSheet(0).getLastRow()).getValues()[passOfEmail[0] - 2][1] === hashWithSHA256(e.parameter.password)) {
-        authenticationPassed = true;
-      } else {
-        alertContent += alert('・アカウント情報が不正です');
-      }
-    } else {
-      alertContent += alert('・アカウント情報が不正です');
-    }
-
-    // 認証が成功した場合のみ保存処理を実行
-    if (authenticationPassed) {
-      alertContent += alert('Saved!!');
-
-      // セキュアな新形式データを作成して保存
-      const saveData = createSecureSaveData(e);
-      getDatabaseSheet(0).getRange('H' + passOfEmail[0]).setValue(JSON.stringify(saveData));
-    }
-
-    // 画面の再表示（認証成功・失敗に関わらず）
-    const template = HtmlService.createTemplateFromFile('index');
-    template.deployURL = ScriptApp.getService().getUrl();
-    template.formHTML = createHtml(e, alertContent);
-    template.projectAccessJson = JSON.stringify(getProjectAccessForForm());
-    const htmlOutput = template.evaluate();
-    htmlOutput.setTitle('勤怠入力');
-    htmlOutput.addMetaTag('viewport', 'width=device-width, initial-scale=1');
-    return htmlOutput;
-  }
-
-  // 勤怠呼び出し
-  if (e.parameter.load) {
-    let databaseSheet = SpreadsheetApp.openById(BillUtil.databaseSheetId);
-    let alertContent = '';
-    let passOfEmail = BillUtil.search(getDatabaseSheet(0), e.parameter.email);
-
-    if (passOfEmail[0] > 0) {
-      if (isUserDeletedRow(getDatabaseSheet(0), passOfEmail[0])) {
-        alertContent += alert('・このユーザーは無効化されています');
-      } else if (!(getDatabaseSheet(0).getRange('F2:G' + getDatabaseSheet(0).getLastRow()).getValues()[passOfEmail[0] - 2][1] === hashWithSHA256(e.parameter.password))) {
-        alertContent += alert('・アカウント情報が不正です');
-      }
-      // 一度も保存がなされていないとき
-      if (getDatabaseSheet(0).getRange('H' + passOfEmail[0]).getValue() === '') {
-        alertContent += alert('・データが保存されていません');
-      }
-    } else {
-      alertContent += alert('・アカウント情報が不正です');
-    }
-
-    // アカウント情報が正しければ保存データを呼び出し
-    if (alertContent === '') {
-      alertContent += alert('Loaded!!');
-      const savedDataJson = getDatabaseSheet(0).getRange('H' + passOfEmail[0]).getValue();
-
-      // 保存データを復元して現在のパスワードと結合
-      const loaded = createLoadedEvent(savedDataJson, e.parameter.email, e.parameter.password);
-
-      const template = HtmlService.createTemplateFromFile('index');
-      template.deployURL = ScriptApp.getService().getUrl();
-      template.formHTML = createHtml(loaded, alertContent);
-      template.projectAccessJson = JSON.stringify(getProjectAccessForForm());
-      const htmlOutput = template.evaluate();
-      htmlOutput.setTitle('勤怠入力');
-      htmlOutput.addMetaTag('viewport', 'width=device-width, initial-scale=1');
-      return htmlOutput;
-    } else {
-      const template = HtmlService.createTemplateFromFile('index');
-      template.deployURL = ScriptApp.getService().getUrl();
-      template.formHTML = createHtml(e, alertContent);
-      template.projectAccessJson = JSON.stringify(getProjectAccessForForm());
-      const htmlOutput = template.evaluate();
-      htmlOutput.setTitle('勤怠入力');
-      htmlOutput.addMetaTag('viewport', 'width=device-width, initial-scale=1');
-      return htmlOutput;
-    }
-  }
-
+function renderAttendanceFormPage(parameter, messages) {
   const template = HtmlService.createTemplateFromFile('index');
   template.deployURL = ScriptApp.getService().getUrl();
-  template.formHTML = createHtml(e, alert('・不正な操作です'));
+  template.formHTML = createHtml(
+    { parameter: parameter || {} },
+    (messages || []).map(message => alert(`・${message}`)).join('')
+  );
   template.projectAccessJson = JSON.stringify(getProjectAccessForForm());
   const htmlOutput = template.evaluate();
   htmlOutput.setTitle('勤怠入力');
   htmlOutput.addMetaTag('viewport', 'width=device-width, initial-scale=1');
   return htmlOutput;
+}
+
+function renderAttendanceSubmittedPage() {
+  const template = HtmlService.createTemplateFromFile('submitted');
+  template.deployURL = ScriptApp.getService().getUrl();
+  const htmlOutput = template.evaluate();
+  htmlOutput.setTitle('提出完了');
+  htmlOutput.addMetaTag('viewport', 'width=device-width, initial-scale=1');
+  return htmlOutput;
+}
+
+function getAttendanceActionFromParameter(parameter) {
+  if (parameter.submit || parameter.action === 'submit') {
+    return 'submit';
+  }
+  if (parameter.save || parameter.action === 'save') {
+    return 'save';
+  }
+  if (parameter.load || parameter.action === 'load') {
+    return 'load';
+  }
+  return '';
+}
+
+function findAttendanceUserByEmail(userSheet, email) {
+  const lastRow = userSheet.getLastRow();
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  if (!normalizedEmail || lastRow < 2) {
+    return null;
+  }
+  const matches = userSheet
+    .getRange(2, USER_COL.email, lastRow - 1, 1)
+    .createTextFinder(String(email || '').trim())
+    .matchEntireCell(true)
+    .findAll();
+  for (let i = 0; i < matches.length; i++) {
+    const rowNumber = matches[i].getRow();
+    const row = userSheet.getRange(rowNumber, 1, 1, 10).getValues()[0];
+    if (String(row[USER_COL.email - 1] || '').trim().toLowerCase() === normalizedEmail) {
+      return { rowNumber: rowNumber, values: row };
+    }
+  }
+  return null;
+}
+
+function authenticateAttendanceRequest(parameter) {
+  const userSheet = getDatabaseSheet(0);
+  const user = findAttendanceUserByEmail(userSheet, parameter.email);
+  if (!user) {
+    return { userSheet: userSheet, user: null, messages: ['アカウント情報が不正です'] };
+  }
+  if (user.values[USER_COL.deletedAt - 1]) {
+    return { userSheet: userSheet, user: user, messages: ['このユーザーは無効化されています'] };
+  }
+  if (user.values[USER_COL.passwordHash - 1] !== hashWithSHA256(parameter.password || '')) {
+    return { userSheet: userSheet, user: user, messages: ['アカウント情報が不正です'] };
+  }
+  if (!user.values[USER_COL.attendanceSheetId - 1]) {
+    return { userSheet: userSheet, user: user, messages: ['勤怠シートIDが設定されていません'] };
+  }
+  return { userSheet: userSheet, user: user, messages: [] };
+}
+
+function getAttendanceFormValidationMessages(parameter) {
+  return AttendanceUtil.getFormValidationMessages(parameter);
+}
+
+function getProjectAccessValidationMessage(userId, projectName) {
+  const validationHtml = validateProjectAccessForUser(userId, projectName);
+  return validationHtml ? '選択されたPJは現在利用できません' : '';
+}
+
+function submitAttendanceRequest(parameter, auth) {
+  const attendanceSheet = SpreadsheetApp
+    .openById(auth.user.values[USER_COL.attendanceSheetId - 1])
+    .getSheets()[0];
+  const duplicateMessages = AttendanceUtil.findDuplicateAttendanceMessages(
+    attendanceSheet,
+    parameter.startTime,
+    parameter.endTime
+  );
+  if (duplicateMessages.length) {
+    return { status: 'error', action: 'submit', messages: duplicateMessages };
+  }
+  const nextRow = attendanceSheet.getLastRow() + 1;
+  attendanceSheet.getRange(nextRow, 1, 1, 5).setValues([[
+    formatTimeToGoogleForm(new Date()),
+    parameter.project,
+    parameter.content,
+    formatTimeToGoogleForm(parameter.startTime),
+    formatTimeToGoogleForm(parameter.endTime)
+  ]]);
+  return { status: 'success', action: 'submit', messages: ['提出しました'] };
+}
+
+function performAttendanceFormAction(request) {
+  const parameter = request || {};
+  const action = getAttendanceActionFromParameter(parameter);
+  if (!action) {
+    return { status: 'error', action: '', messages: ['不正な操作です'] };
+  }
+
+  const auth = authenticateAttendanceRequest(parameter);
+  let messages = auth.messages.slice();
+  if (action === 'submit') {
+    messages = messages.concat(getAttendanceFormValidationMessages(parameter));
+    if (!messages.length) {
+      const projectMessage = getProjectAccessValidationMessage(
+        auth.user.values[USER_COL.id - 1],
+        parameter.project
+      );
+      if (projectMessage) {
+        messages.push(projectMessage);
+      }
+    }
+    if (messages.length) {
+      return { status: 'error', action: action, messages: messages };
+    }
+    return submitAttendanceRequest(parameter, auth);
+  }
+
+  if (messages.length) {
+    return { status: 'error', action: action, messages: messages };
+  }
+  if (action === 'save') {
+    const saveData = createSecureSaveData({ parameter: parameter });
+    auth.userSheet
+      .getRange(auth.user.rowNumber, USER_COL.savedData)
+      .setValue(JSON.stringify(saveData));
+    return { status: 'success', action: action, messages: ['一時保存しました'] };
+  }
+
+  const savedDataJson = auth.user.values[USER_COL.savedData - 1];
+  if (!savedDataJson) {
+    return { status: 'error', action: action, messages: ['データが保存されていません'] };
+  }
+  const loaded = createLoadedEvent(savedDataJson, parameter.email || '', '');
+  return {
+    status: 'success',
+    action: action,
+    messages: ['保存データを呼び出しました'],
+    fields: {
+      email: loaded.parameter.email || '',
+      project: loaded.parameter.project || '',
+      content: loaded.parameter.content || '',
+      startTime: loaded.parameter.startTime || '',
+      endTime: loaded.parameter.endTime || ''
+    }
+  };
+}
+
+function runAttendanceFormAction(request) {
+  return performAttendanceFormAction(request || {});
+}
+
+// POSTメソッド（JavaScript無効時のフォールバックを含む）
+function doPost(e) {
+  const parameter = e && e.parameter ? e.parameter : {};
+  if (parameter.mode === 'admin') {
+    return handleAdminPost(e);
+  }
+
+  const result = performAttendanceFormAction(parameter);
+  if (result.status === 'success' && result.action === 'submit') {
+    return renderAttendanceSubmittedPage();
+  }
+  const nextParameter = result.status === 'success' && result.action === 'load'
+    ? Object.assign({}, parameter, result.fields || {}, { password: parameter.password || '' })
+    : parameter;
+  return renderAttendanceFormPage(nextParameter, result.messages);
 }
 
 // フォームデータのバリデーション関数
@@ -1444,27 +1435,47 @@ function validateProjectAccess(email, password, projectName) {
   return '';
 }
 
-// 二重勤怠チェック関数
-function checkDuplicateAttendance(e, passOfEmailIndex) {
-  let alertContent = '';
-
-  const attendanceSheet = SpreadsheetApp.openById(getDatabaseSheet(0).getRange('B' + passOfEmailIndex).getValue()).getSheets()[0];
-
-  // 初回勤怠のときは二重勤怠バリデーションをスキップ
-  if (!(attendanceSheet.getLastRow() === 1)) {
-    const previousAttendanceArray = attendanceSheet.getRange('A2:E' + attendanceSheet.getLastRow()).getValues();
-    for (let i = 0; i < previousAttendanceArray.length; i++) {
-      let startTime = new Date(e.parameter.startTime);
-      let endTime = new Date(e.parameter.endTime);
-      let previousStartTime = new Date(previousAttendanceArray[i][3]);
-      let previousEndTime = new Date(previousAttendanceArray[i][4]);
-      if (!(startTime >= previousEndTime || endTime <= previousStartTime)) {
-        alertContent += alert(`・入力された勤怠はタイムスタンプ:${previousAttendanceArray[i][0]}に提出された勤怠と重複する時間があります。開始時刻と終了時刻を再度確認してください。`);
-      }
-    }
+function validateProjectAccessForUser(userId, projectName) {
+  if (!projectName) {
+    return '';
   }
 
-  return alertContent;
+  const projectsSheet = getDatabaseSheet(1);
+  if (projectsSheet.getLastRow() < 2) {
+    return alert('・選択されたPJは現在利用できません');
+  }
+
+  const normalizedUserId = String(userId || '');
+  const projectRows = projectsSheet
+    .getRange(2, 1, projectsSheet.getLastRow() - 1, PROJECT_COL.assignedUserIds)
+    .getValues();
+  const selectable = projectRows.some(row => {
+    if (String(row[PROJECT_COL.name - 1]) !== String(projectName) ||
+        !isTruthyCell(row[PROJECT_COL.active - 1])) {
+      return false;
+    }
+    const rawAssigned = String(row[PROJECT_COL.assignedUserIds - 1] || '').trim();
+    if (!rawAssigned) {
+      return true;
+    }
+    if (rawAssigned === NO_ASSIGNED_USERS) {
+      return false;
+    }
+    return rawAssigned.split(',').map(value => value.trim()).includes(normalizedUserId);
+  });
+  return selectable ? '' : alert('・選択されたPJは現在利用できません');
+}
+
+// 二重勤怠チェック関数
+function checkDuplicateAttendance(e, passOfEmailIndex, attendanceSheetId) {
+  const resolvedAttendanceSheetId = attendanceSheetId ||
+    getDatabaseSheet(0).getRange('B' + passOfEmailIndex).getValue();
+  const attendanceSheet = SpreadsheetApp.openById(resolvedAttendanceSheetId).getSheets()[0];
+  return AttendanceUtil.findDuplicateAttendanceMessages(
+    attendanceSheet,
+    e.parameter.startTime,
+    e.parameter.endTime
+  ).map(message => alert(`・${message}`)).join('');
 }
 
 // セキュアな保存データ作成関数
@@ -1608,6 +1619,27 @@ function createHtml(e, alert = '') {
 }
 
 function getProjectAccessForForm() {
+  const cache = CacheService.getScriptCache();
+  const cacheKey = 'projectAccessForForm:v1';
+  const cached = cache.get(cacheKey);
+  if (cached) {
+    return JSON.parse(cached);
+  }
+
+  const projectAccess = buildProjectAccessForForm();
+  try {
+    cache.put(cacheKey, JSON.stringify(projectAccess), 60);
+  } catch (error) {
+    console.warn(`PJ選択肢のキャッシュ保存をスキップしました: ${error.message}`);
+  }
+  return projectAccess;
+}
+
+function clearProjectAccessForFormCache() {
+  CacheService.getScriptCache().remove('projectAccessForForm:v1');
+}
+
+function buildProjectAccessForForm() {
   const sheets = getDatabaseSheets();
   const usersSheet = sheets[0];
   const projectsSheet = sheets[1];
@@ -2062,6 +2094,7 @@ function nextNumericId(sheet) {
 function addProject(params) {
   const sheet = getDatabaseSheet(1);
   sheet.appendRow([nextNumericId(sheet), params.projectName, Number(params.hourlyWage || 0), true, params.assignedUserIds || '']);
+  clearProjectAccessForFormCache();
 }
 
 function updateProject(params) {
@@ -2078,6 +2111,7 @@ function updateProject(params) {
   if (normalizeAssignedUserIdsForAdmin(sheet.getRange(row, PROJECT_COL.assignedUserIds).getValue()) !== nextAssignedUserIds) {
     sheet.getRange(row, PROJECT_COL.assignedUserIds).setValue(nextAssignedUserIds);
   }
+  clearProjectAccessForFormCache();
 }
 
 function bulkUpdateProjectStatus(params) {
@@ -2106,6 +2140,7 @@ function bulkUpdateProjectStatus(params) {
   });
   if (changed) {
     range.setValues(values);
+    clearProjectAccessForFormCache();
   }
 }
 
@@ -2119,6 +2154,7 @@ function updateProjectAssignments(params) {
   if (normalizeAssignedUserIdsForAdmin(sheet.getRange(row, PROJECT_COL.assignedUserIds).getValue()) !== nextAssignedUserIds) {
     sheet.getRange(row, PROJECT_COL.assignedUserIds).setValue(nextAssignedUserIds);
   }
+  clearProjectAccessForFormCache();
 }
 
 function addWageUpgrade(params) {
@@ -2182,6 +2218,7 @@ function upsertUser(params) {
       ''
     ]);
   }
+  clearProjectAccessForFormCache();
 }
 
 function updateUserName(params) {
@@ -2198,6 +2235,7 @@ function logicalDeleteUser(userId) {
   const sheet = getDatabaseSheet(0);
   const row = findRowById(sheet, userId);
   sheet.getRange(row, USER_COL.deletedAt).setValue(new Date());
+  clearProjectAccessForFormCache();
 }
 
 function addRoleAllowance(params) {

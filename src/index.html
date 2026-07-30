@@ -8,7 +8,8 @@
     <body>
       <div class="container" style="max-width: 600px;">
         <h2 class="text-center m-4">勤怠入力フォーム</h2>
-        <form class="mb-5" method="POST" action="<?= deployURL ?>" accept-charset="UTF-8">
+        <div id="formMessages" class="mb-3" style="min-height: 1.75rem;" aria-live="polite"></div>
+        <form id="attendanceForm" class="mb-5" method="POST" action="<?= deployURL ?>" accept-charset="UTF-8">
           <? output._ = formHTML ?>
           <div class="d-flex flex-wrap gap-2 align-items-start">
             <button type='submit' class="btn btn-outline-secondary" name="load" value="true">呼び出し</button>
@@ -26,12 +27,20 @@
             <button type="submit" class="btn btn-primary" name="submit" value="true">提出</button>
           </div>
         </form>
+        <div id="attendanceComplete" class="d-none text-center mb-5">
+          <h3 class="mb-3">提出しました</h3>
+          <button type="button" class="btn btn-primary" id="continueAttendance">続けて入力</button>
+        </div>
       </div>
       <script>
         const projectAccess = <?!= projectAccessJson ?>;
+        const attendanceForm = document.getElementById('attendanceForm');
         const emailInput = document.getElementById('email');
         const projectSelect = document.getElementById('projectSelect');
+        const formMessages = document.getElementById('formMessages');
+        const attendanceComplete = document.getElementById('attendanceComplete');
         let projectFilterRequestId = 0;
+        let projectFilterTimer = null;
         const currentMonthValue = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
         document.querySelectorAll('.js-worktime-month').forEach(input => input.max = currentMonthValue);
 
@@ -47,10 +56,11 @@
         }
         function resetProjectOptions(projects) {
           const selectedProject = projectSelect.value || projectSelect.dataset.selectedProject || '';
+          const hasProjects = projects.length > 0;
           projectSelect.innerHTML = '';
           const placeholder = document.createElement('option');
           placeholder.value = '';
-          placeholder.textContent = '選択してください';
+          placeholder.textContent = hasProjects ? '選択してください' : '選択可能なPJがありません';
           placeholder.disabled = true;
           projectSelect.appendChild(placeholder);
 
@@ -67,7 +77,108 @@
             projectSelect.value = '';
           }
           placeholder.selected = projectSelect.value === '';
+          projectSelect.disabled = !hasProjects;
+          projectSelect.setAttribute('aria-disabled', String(!hasProjects));
         }
+
+        function showFormMessages(messages, isError) {
+          formMessages.innerHTML = '';
+          (messages || []).forEach(message => {
+            const item = document.createElement('p');
+            item.className = isError ? 'text-danger mb-1' : 'text-success mb-1';
+            item.textContent = message;
+            formMessages.appendChild(item);
+          });
+        }
+
+        function setAttendanceBusy(isBusy) {
+          attendanceForm.querySelectorAll('button').forEach(button => {
+            button.disabled = isBusy;
+          });
+          if (isBusy) {
+            formMessages.innerHTML = `
+              <p id="attendanceLoading" class="text-muted mb-1">
+                <span class="spinner-border spinner-border-sm me-2" aria-hidden="true"></span>処理中...
+              </p>
+            `;
+          } else {
+            const loadingMessage = document.getElementById('attendanceLoading');
+            if (loadingMessage) {
+              loadingMessage.remove();
+            }
+          }
+        }
+
+        function applyLoadedAttendanceFields(fields) {
+          const values = fields || {};
+          emailInput.value = values.email || '';
+          attendanceForm.elements.content.value = values.content || '';
+          attendanceForm.elements.startTime.value = values.startTime || '';
+          attendanceForm.elements.endTime.value = values.endTime || '';
+          projectSelect.value = '';
+          projectSelect.dataset.selectedProject = values.project || '';
+          refreshProjectOptions();
+        }
+
+        function showAttendanceComplete() {
+          attendanceForm.classList.add('d-none');
+          attendanceComplete.classList.remove('d-none');
+          formMessages.innerHTML = '';
+        }
+
+        function resetAttendanceForm() {
+          const retainedEmail = emailInput.value;
+          attendanceForm.reset();
+          emailInput.value = retainedEmail;
+          attendanceForm.elements.password.value = '';
+          attendanceForm.elements.content.value = '';
+          attendanceForm.elements.startTime.value = '';
+          attendanceForm.elements.endTime.value = '';
+          projectSelect.value = '';
+          projectSelect.dataset.selectedProject = '';
+          attendanceComplete.classList.add('d-none');
+          attendanceForm.classList.remove('d-none');
+          formMessages.innerHTML = '';
+          refreshProjectOptions();
+          attendanceForm.elements.password.focus();
+        }
+
+        function submitAttendanceAction(action) {
+          const request = {};
+          new FormData(attendanceForm).forEach((value, key) => {
+            request[key] = value;
+          });
+          request.action = action;
+          showFormMessages([], false);
+          setAttendanceBusy(true);
+          google.script.run
+            .withSuccessHandler(function(result) {
+              setAttendanceBusy(false);
+              if (result && result.status === 'success') {
+                if (result.action === 'submit') {
+                  showAttendanceComplete();
+                  return;
+                }
+                if (result.action === 'load') {
+                  applyLoadedAttendanceFields(result.fields);
+                }
+                showFormMessages(result.messages || [], false);
+                return;
+              }
+              showFormMessages(
+                result && result.messages ? result.messages : ['処理に失敗しました'],
+                true
+              );
+            })
+            .withFailureHandler(function(error) {
+              setAttendanceBusy(false);
+              showFormMessages([
+                error && error.message ? error.message : String(error || '処理に失敗しました')
+              ], true);
+            })
+            .runAttendanceFormAction(request);
+        }
+
         async function refreshProjectOptions() {
           const requestId = ++projectFilterRequestId;
           const normalizedEmail = normalizeEmail(emailInput.value);
@@ -97,13 +208,29 @@
           const isHidden = wrap.classList.toggle('d-none');
           this.setAttribute('aria-expanded', String(!isHidden));
         });
-        document.querySelector('form').addEventListener('keydown', function(event) {
+        attendanceForm.addEventListener('keydown', function(event) {
           if (event.key === 'Enter' && event.target.tagName !== 'TEXTAREA') {
             event.preventDefault();
           }
         });
+        attendanceForm.addEventListener('submit', function(event) {
+          const submitter = event.submitter;
+          if (!submitter || submitter.name === 'view') {
+            return;
+          }
+          const action = submitter.name;
+          if (!['submit', 'save', 'load'].includes(action)) {
+            return;
+          }
+          event.preventDefault();
+          submitAttendanceAction(action);
+        });
+        document.getElementById('continueAttendance').addEventListener('click', resetAttendanceForm);
         if (emailInput && projectSelect) {
-          emailInput.addEventListener('input', refreshProjectOptions);
+          emailInput.addEventListener('input', function() {
+            clearTimeout(projectFilterTimer);
+            projectFilterTimer = setTimeout(refreshProjectOptions, 150);
+          });
           refreshProjectOptions();
         }
       </script>
