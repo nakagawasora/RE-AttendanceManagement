@@ -8,14 +8,14 @@
   <body>
     <div class="container" style="max-width: 920px;">
       <h2 class="text-center m-4">実績</h2>
-      <div id="app"></div>
+      <div id="app" data-deploy-url="<?= deployURL ?>" data-email="<?= email ?>" data-password="<?= password ?>"></div>
     </div>
     <script>
       const result = <?!= resultJson ?>;
       const app = document.getElementById('app');
-      const deployURL = <?= JSON.stringify(deployURL) ?>;
-      const email = <?= JSON.stringify(email) ?>;
-      const password = <?= JSON.stringify(password) ?>;
+      const deployURL = app.dataset.deployUrl;
+      const email = app.dataset.email;
+      const password = app.dataset.password;
       const currentMonthValue = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
 
       if (result.status !== 'success') {
@@ -43,19 +43,33 @@
           </table>
           <div class="fs-4 text-end mt-4">税込合計 ${Number(data.totalAmount).toLocaleString()}円</div>
           <div class="d-flex flex-wrap gap-3 mt-4 align-items-end">
-            <div>${worktimeForm(`<input type="hidden" name="month" value="${previous.month}"><input type="hidden" name="year" value="${previous.year}"><button class="btn btn-outline-primary text-nowrap">前月を見る</button>`)}</div>
-            <div class="ms-auto">${worktimeForm(`<div class="d-flex gap-2 align-items-end"><div><label class="form-label small text-muted mb-1">年月を指定</label><input class="form-control" type="month" name="monthForWorkTime" max="${currentMonthValue}"></div><button class="btn btn-outline-primary text-nowrap">指定年月を見る</button></div>`)}</div>
+            <div><button type="button" class="btn btn-outline-primary text-nowrap" onclick="navigateWorktime(${previous.year}, ${previous.month})">前月を見る</button></div>
+            <div class="ms-auto">
+              <div class="d-flex gap-2 align-items-end">
+                <div><label class="form-label small text-muted mb-1" for="monthForWorkTime">年月を指定</label><input id="monthForWorkTime" class="form-control" type="month" max="${currentMonthValue}"></div>
+                <button type="button" class="btn btn-outline-primary text-nowrap" onclick="navigateSelectedMonth()">指定年月を見る</button>
+              </div>
+            </div>
           </div>
         `;
       }
 
-      function worktimeForm(inner) {
-        return `<form method="GET" action="${deployURL}">
-          <input type="hidden" name="view" value="worktime">
-          <input type="hidden" name="email" value="${escapeHtml(email)}">
-          <input type="hidden" name="password" value="${escapeHtml(password)}">
-          ${inner}
-        </form>`;
+      function navigateWorktime(year, month) {
+        const url = new URL(deployURL);
+        url.searchParams.set('view', 'worktime');
+        url.searchParams.set('email', email);
+        url.searchParams.set('password', password);
+        url.searchParams.set('year', String(year));
+        url.searchParams.set('month', String(month));
+        window.open(url.toString(), '_top');
+      }
+      function navigateSelectedMonth() {
+        const value = document.getElementById('monthForWorkTime').value;
+        if (!value) {
+          return;
+        }
+        const parts = value.split('-');
+        navigateWorktime(Number(parts[0]), Number(parts[1]));
       }
       function previousMonth(year, month) {
         const date = new Date(Number(year), Number(month) - 2, 1);
