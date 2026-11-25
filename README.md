@@ -102,6 +102,94 @@ GAS のスクリプトプロパティに以下を設定します。
 
 データベーススプレッドシートは、業務データ 4 シートとメタシートで構成します。
 
+### データ構成図
+
+```mermaid
+erDiagram
+  direction TB
+
+  USERS {
+    string id PK "論理キー"
+    string attendanceSheetId "勤怠スプレッドシートID"
+    string slackUserId "SlackユーザーID"
+    string driveFolderId "請求書出力先DriveフォルダID"
+    string addressSheetId "個人情報スプレッドシートID"
+    string email
+    string passwordHash
+    string savedData "一時保存JSON"
+    string name
+    datetime deletedAt
+  }
+  PROJECTS {
+    string id PK "論理キー"
+    string name
+    number hourlyWage
+    string active "TRUE/有効/active/1/空欄を有効扱い"
+    string assignedUserIds "user IDカンマ区切り、空欄は全員"
+  }
+  WAGE_UPGRADES {
+    string id PK "論理キー"
+    string userId FK "論理参照"
+    string projectId FK "論理参照"
+    number increment
+  }
+  ROLE_ALLOWANCES {
+    string id PK "論理キー"
+    string name
+    string userId FK "論理参照"
+    number price
+    datetime deletedAt
+  }
+  ADMIN_WHITELIST {
+    string email PK "論理キー"
+    string active
+    string memo
+  }
+  ADMIN_EXECUTION_LOGS {
+    datetime timestamp
+    string action
+    string period
+    string status
+    string message
+    string operatorEmail
+  }
+  USER_ATTENDANCE_SHEET {
+    datetime timestamp
+    string projectName
+    string workContent
+    datetime startTime
+    datetime endTime
+  }
+  PERSONAL_INFO_SHEET {
+    string personalInfo "個人情報シート内の項目"
+  }
+  DRIVE_FOLDER {
+    string invoiceFiles "請求書ファイル"
+  }
+  SLACK_USER {
+    string account "Slackアカウント"
+  }
+  DATABASE_SPREADSHEET {
+    string DATABASE_SHEET_ID "スクリプトプロパティ"
+  }
+
+  DATABASE_SPREADSHEET ||--|| USERS : "Usersシート"
+  DATABASE_SPREADSHEET ||--|| PROJECTS : "Projectsシート"
+  DATABASE_SPREADSHEET ||--|| WAGE_UPGRADES : "WageUpgradesシート"
+  DATABASE_SPREADSHEET ||--|| ROLE_ALLOWANCES : "RoleAllowancesシート"
+  DATABASE_SPREADSHEET ||--|| ADMIN_WHITELIST : "AdminWhitelistシート"
+  DATABASE_SPREADSHEET ||--|| ADMIN_EXECUTION_LOGS : "AdminExecutionLogsシート"
+  USERS ||--|| USER_ATTENDANCE_SHEET : "attendanceSheetId"
+  USERS ||--|| PERSONAL_INFO_SHEET : "addressSheetId"
+  USERS }o--|| DRIVE_FOLDER : "driveFolderId"
+  USERS }o--|| SLACK_USER : "slackUserId"
+  USERS ||--o{ WAGE_UPGRADES : "userId"
+  PROJECTS ||--o{ WAGE_UPGRADES : "projectId"
+  USERS ||--o{ ROLE_ALLOWANCES : "userId"
+```
+
+凡例: `PK` / `FK` はアプリケーション上の論理キー・論理参照を示します。Google スプレッドシートにはデータベースの一意制約や外部キー制約はなく、値の重複や参照切れを防ぐ制約ではありません。ER図の外部エンティティは `DATABASE_SHEET_ID` のスプレッドシート外にある参照先です。`attendanceSheetId` と `addressSheetId` は各ユーザーの勤怠・個人情報スプレッドシート、`driveFolderId` は請求書出力先 Drive フォルダ、`slackUserId` は Slack ユーザーを指します。勤怠シートはユーザーごとに別ファイルで、列は timestamp、PJ名、作業内容、開始、終了です。
+
 業務データは `Users`、`Projects`、`WageUpgrades`、`RoleAllowances` のシート名で判定します。シート順を並び替えても、この名前が合っていれば同じシートとして扱います。
 
 メタシートの `AdminWhitelist` と `AdminExecutionLogs` は名前で除外されるため、業務データの 1〜4 枚目としては扱われません。メタシート作成でシート順が崩れた場合は `repairDatabaseSheetOrder()` を実行すると、業務シート、ホワイトリスト、ログの順に整えます。
